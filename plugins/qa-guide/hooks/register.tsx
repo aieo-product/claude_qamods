@@ -441,7 +441,21 @@ export function buildCompactContext(
   ]
   const fixedLength = headings.join('\n').length + 4
   const leadData = lead.slice(-2500)
-  const questionJson = JSON.stringify(questions, null, 1)
+  // Shorten long fields one by one so every question and every option label
+  // survives; clipping the serialized JSON could drop later options entirely.
+  const fitQuestions = (preview: number, description: number) => JSON.stringify(questions.map(q => ({
+    question: bounded(q.question, 600),
+    ...(q.header ? { header: bounded(q.header, 60) } : {}),
+    multiSelect: q.multiSelect,
+    options: q.options.map(o => ({
+      label: bounded(o.label, 120),
+      ...(o.description ? { description: bounded(o.description, description) } : {}),
+      ...(o.preview && preview > 0 ? { preview: bounded(o.preview, preview) } : {}),
+    })),
+  })), null, 1)
+  let questionJson = fitQuestions(400, 300)
+  if (questionJson.length > 6000) questionJson = fitQuestions(0, 160)
+  if (questionJson.length > 6000) questionJson = fitQuestions(0, 0)
   // JSON escapes can expand even a clipped instruction. Leave room for
   // questions while retaining the bounded lead and every tool summary.
   const promptBudget = Math.max(0, COMPACT_CONTEXT_CAP - fixedLength - leadData.length -

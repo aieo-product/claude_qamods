@@ -2637,3 +2637,24 @@ test('English explanation lines wrap at spaces, not inside words', async ($, on)
   await calls.clock.advance(1000)
   await asked
 })
+
+test('compact context keeps every question and option label when previews are huge', async () => {
+  const big = 'x'.repeat(20000)
+  const questions = [
+    { question: 'Pick a layout?', header: 'Layout', multiSelect: false, options: [
+      { label: 'Grid', description: 'd'.repeat(5000), preview: big },
+      { label: 'List', description: 'Simple list', preview: big },
+      { label: 'Board', description: 'Kanban board' },
+    ] },
+    { question: 'Pick a theme?', header: 'Theme', multiSelect: false, options: [
+      { label: 'Dark', description: '', preview: big },
+      { label: 'Light', description: '' },
+    ] },
+  ]
+  const prompt = buildCompactContext([], ['Build a board app'], 'lead text', questions, 'en')
+
+  expect(prompt.length).toBeLessThan(12001)
+  for (const text of ['Pick a layout?', 'Grid', 'List', 'Board', 'Pick a theme?', 'Dark', 'Light', 'Simple list', 'Kanban board']) {
+    expect(prompt).toContain(text)
+  }
+})
