@@ -1,0 +1,10 @@
+{
+  "name": "qa-guide",
+  "version": "0.1.0",
+  "description": "Shows Claude's AskUserQuestion prompts in a side pane with context, option details, an AI explanation and answer history.",
+  "author": { "name": "aieo-product" },
+  "repository": "https://github.com/aieo-product/claude_qamods",
+  "license": "MIT",
+  "keywords": ["askuserquestion", "mod", "pane", "ui"],
+  "types": "./types/index.d.ts"
+}

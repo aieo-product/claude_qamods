@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-qamods",
+  "description": "Claude Code mods that make Claude's questions easier to read and answer.",
+  "owner": { "name": "aieo-product" },
+  "plugins": [
+    {
+      "name": "qa-guide",
+      "description": "Shows Claude's AskUserQuestion prompts in a side pane with context, option details, an AI explanation and answer history.",
+      "version": "0.1.0",
+      "author": { "name": "aieo-product" },
+      "source": "./plugins/qa-guide",
+      "category": "productivity",
+      "tags": ["askuserquestion", "mod", "ui"]
+    }
+  ]
+}
