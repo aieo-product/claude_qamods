@@ -69,7 +69,9 @@ Run these commands inside Claude Code:
 /plugin install qa-guide@claude-qamods
 ```
 
-To remove it, run `/plugin uninstall qa-guide@claude-qamods`.
+The installer may print `1 userConfig option not yet set`. You can ignore it: the `language` option defaults to `auto`. To pick a language, run `/plugin configure qa-guide@claude-qamods` or use `/config`.
+
+To update, run `/plugin marketplace update claude-qamods` and then `/plugin update qa-guide@claude-qamods`. To remove it, run `/plugin uninstall qa-guide@claude-qamods`.
 
 ## Usage
 

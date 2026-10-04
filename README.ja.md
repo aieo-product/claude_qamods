@@ -69,7 +69,9 @@ Claude Code の中で次の 2 つを実行します。
 /plugin install qa-guide@claude-qamods
 ```
 
-アンインストールは `/plugin uninstall qa-guide@claude-qamods` です。
+インストール時に `1 userConfig option not yet set` と表示されることがありますが、対応は不要です。`language` オプションの既定値は `auto` です。言語を選びたい場合は、`/plugin configure qa-guide@claude-qamods` か `/config` で設定してください。
+
+更新は `/plugin marketplace update claude-qamods` のあとに `/plugin update qa-guide@claude-qamods`、アンインストールは `/plugin uninstall qa-guide@claude-qamods` です。
 
 ## 使い方
 
