@@ -1,0 +1,55 @@
+name: Bug report
+description: Something in qa-guide does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please **remove personal data** (paths, names, emails, conversation content you do not want public) from logs and screenshots before posting.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start `claude` in a terminal 160 columns wide
+        2. Ask Claude to ask you a question with options
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: cc-version
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`
+    validations:
+      required: true
+  - type: input
+    id: qa-version
+    attributes:
+      label: qa-guide version
+      placeholder: "0.1.0"
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options: [Terminal (fullscreen), Terminal (main screen), Desktop app, VS Code, Other]
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and terminal
+      placeholder: macOS 15 / Ghostty
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Lines starting with `qa-guide:` from the transcript or from `claude --debug` help a lot.
+      render: text

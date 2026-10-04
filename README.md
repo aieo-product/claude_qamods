@@ -1,17 +1,64 @@
 # claude_qamods
 
-Claude Code mods built with the function-hooks plugin API. The first mod, **qa-guide**, adds a guide pane for Claude's `AskUserQuestion` prompts so you can make a decision with the context in view.
+[日本語](README.ja.md) · English
 
-The pane shows:
+Claude Code mods that make Claude's questions easier to read and answer.
 
-- A status badge: awaiting an answer, answered, or cancelled.
-- Your three most recent instructions from terminal, Remote Control, or SDK prompts, and Claude's explanation leading up to the question.
-- Question cards with a header chip, a multi-select tag when applicable, numbered options, descriptions, and previews.
-- A green ✔ beside each selected option after you answer.
-- An optional AI explanation starting with a short summary of your current instructions and how the question relates, followed by why Claude is asking, each option's effects numbered in dialog order, and a numbered recommendation. Multiple questions have separate Q headings and restart option numbering at 1.
-- Recent questions and answers, keeping up to 20 entries including the current question.
+The first mod, **qa-guide**, opens a side pane whenever Claude asks you something with `AskUserQuestion`. The pane explains *why* Claude is asking and *what each option leads to*, so you can answer without scrolling back through the conversation.
 
-Answer through Claude Code's usual question interface. The guide updates alongside it, and AI explanation generation runs asynchronously so you can answer while it is still loading. The pane labels and AI explanations are currently in Japanese.
+![qa-guide while a question is open: the dialog on the left, the background pane on the right](docs/images/compact-view.png)
+
+[![Watch the 77-second demo](docs/images/pv-poster.jpg)](docs/media/qa-guide-pv-16x9.mp4)
+
+▶ Demo video: [landscape 16:9](docs/media/qa-guide-pv-16x9.mp4) · [portrait 9:16](docs/media/qa-guide-pv-9x16.mp4)
+
+## Contents
+
+- [Why](#why)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Usage](#usage)
+- [How it works](#how-it-works)
+- [Privacy and cost](#privacy-and-cost)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Contributing](#contributing)
+- [Credits](#credits)
+- [License](#license)
+
+## Why
+
+Claude's question dialog shows a question and a few short options. After a long session it is easy to lose track of what the question is about, so you end up scrolling back through the transcript before you can answer. qa-guide keeps that context next to the dialog.
+
+## Features
+
+**While a question is open** (compact view, fits the pane without scrolling)
+
+- **AI explanation**, generated in the background from the session's own transcript:
+  - a summary of the instructions Claude is currently working under
+  - why Claude is asking now
+  - the effect of each option, numbered exactly like the dialog
+  - a one-line recommendation
+- **Your recent instructions.** Only prompts you typed are shown. Task notifications and other engine messages are left out.
+- **The tail of Claude's explanation** leading up to the question.
+- The question text and options are not repeated. They are already in the dialog.
+
+**After you answer** (full view)
+
+- Option cards with descriptions and previews, with a green ✔ on what you chose
+- Free-text answers and multi-select answers, including labels that contain commas
+- History of the last 20 questions: step through them with `p` / `n` / `l`, or open one from the list
+
+| Full view after answering | Browsing history with `p` / `n` |
+| --- | --- |
+| ![Full view with the chosen answer marked](docs/images/full-view.png) | ![History navigation showing question 2 of 2](docs/images/history.png) |
+
+## Requirements
+
+- **Claude Code 2.1.286 or later.** The mod uses the function-hooks plugin API, which is **early access** and may change between releases.
+- A terminal, preferably in fullscreen mode. The pane opens on its own when the terminal is at least **144 columns** wide. `/qa-guide` opens it at any width.
+- The pane labels and AI explanations are currently in **Japanese**. English output is planned.
 
 ## Install
 
@@ -22,55 +69,81 @@ Run these commands inside Claude Code:
 /plugin install qa-guide@claude-qamods
 ```
 
-Tested with **Claude Code 2.1.286**. The function-hooks API is early access and may change between releases.
+To remove it, run `/plugin uninstall qa-guide@claude-qamods`.
 
 ## Usage
 
-Use fullscreen mode and a wide terminal for the best experience. The pane opens automatically when Claude asks a question and the terminal is at least **144 columns** wide. If it cannot be placed, a toast points you to `/qa-guide`, which opens it explicitly at any width.
+Nothing to configure. When Claude asks a question, the pane opens next to the dialog. Answer in the dialog as usual.
 
-While a question is open, the pane shows only its background, sized to the visible rows without scrolling while the question dialog holds the keyboard. Question text, option cards, and previews stay in the question dialog. The AI explanation uses up to about 65% of the rows, with magenta headings, cyan option numbers, bold labels, and a green recommendation. Wrapped option text aligns after its number. Blank rows separate headings and context sections when space allows; text takes priority in short panes. The newest instruction uses up to two wrapped lines, and the latest lines of Claude's preceding explanation fill the remaining space. When AI is off or still loading, that space goes to the instruction and preceding explanation.
+| Control | Where | Action |
+| --- | --- | --- |
+| `/qa-guide` | prompt | Open the guide (also before the first question) |
+| `p` / `n` | pane focused | Previous (older) / next (newer) question |
+| `l` | pane focused | Back to the latest question |
+| `h` | pane focused | Show or hide the history list |
+| `a` | pane focused | Turn AI explanations on or off for the next questions |
+| `Ctrl+X` then `Tab`, or click | anywhere | Move keyboard focus into the pane |
+| `Esc` | pane focused | Return focus to the prompt |
 
-After you answer or cancel, the full view shows the selected question, its instructions, Markdown context, option cards, previews, and ✔ answers. Use `p` and `n` to browse questions one by one, or `l` to return to the latest; the toolbar shows your position, such as `3/7`. You can scroll to read the full content. The history list also has a button for each question, with the selected question marked.
+While the question dialog is open it holds the keyboard, so the pane cannot be scrolled. That is why the compact view is sized to fit. After you answer, the full view can be scrolled.
 
-| Control | Action |
+## How it works
+
+qa-guide is a single hooks module, `plugins/qa-guide/hooks/register.tsx`:
+
+| Hook | What it does |
 | --- | --- |
-| `/qa-guide` | Open the question guide, including before the first question. |
-| `p` / ◀ 前 | View the previous (older) question. |
-| `n` / 次 ▶ | View the next (newer) question. |
-| `l` / 最新 | Return to the latest question. |
-| `a` | Toggle AI explanations for subsequent questions. |
-| `h` | Show or hide previous questions and answers. |
-| Question button in history | Open that question in the full view. |
-| Close button | Close the pane; `/qa-guide` opens it again. |
+| `prompt.submit` | Records the last 5 prompts you typed (origins `composer`, `bridge`, `sdk`) |
+| `tool.call` (`AskUserQuestion`) | Collects context, opens the pane, starts the AI explanation without blocking, then waits for the dialog and stores the answer |
+| `ui.render` (`Pane`) | Draws the compact view while the question is open and the full view afterwards |
+| `session.start` / `command.run` | Registers and handles `/qa-guide` |
 
-These keys work while the pane has keyboard focus in the full view. Click the pane or use `Ctrl+X`, then `Tab`, to move focus into it. Press `Esc` to return focus to the prompt. A new question always returns the guide to the latest entry.
+The AI explanation uses `$.model.fork`, which asks one tool-less question over the session's existing transcript. The answer arrives while you are still reading, and the dialog is never held back. State lives in `$.state`, so it survives a hot reload but not the end of the session.
 
-AI explanations are enabled by default and add a model call for each question. `$.model.fork` uses the session's model and transcript, reusing its prompt cache when available; calls still incur usage costs, and an expired cache or model change can increase input costs. Toggle AI off with `a` to prevent forks for subsequent questions. This does not cancel an explanation already in progress. Preferences and question history last only for the current session.
+## Privacy and cost
 
-## Local development
+- **Nothing leaves your session.** qa-guide sends no network requests of its own. The AI explanation is one extra request to the same model and account the session already uses, over the same transcript.
+- **Nothing is written to disk.** Prompts, questions and answers are kept in session memory (`$.state`) and are gone when the session ends.
+- **Cost.** Each question with AI explanations on adds one model call. The call reuses the session's prompt cache when it can, so it is usually cheap, but it is not free. An expired cache or a model switch can make it more expensive. Press `a` to turn explanations off.
 
-From a checkout of this repository:
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| The pane does not open when Claude asks | The terminal is narrower than 144 columns. Widen it, or run `/qa-guide`. A toast tells you when this happens. |
+| `/qa-guide` is not recognised | Run `/plugin` and check that `qa-guide@claude-qamods` is installed and enabled, then start a new session. |
+| AI explanation says it could not be generated | The fork had nothing to read (a brand-new session or right after `/clear`), or the API returned an error. The rest of the pane still works. |
+| Nothing renders after a Claude Code update | The early-access API may have changed. Please [open an issue](https://github.com/aieo-product/claude_qamods/issues/new/choose) with your Claude Code version. |
+
+## Development
 
 ```sh
-claude --plugin-dir plugins/qa-guide
+git clone https://github.com/aieo-product/claude_qamods
+cd claude_qamods
+claude --plugin-dir plugins/qa-guide        # try it in a session
 ```
 
-Validation and tests:
+Checks:
 
 ```sh
-claude plugin test plugins/qa-guide
+claude plugin validate .                    # marketplace manifest
+claude plugin validate plugins/qa-guide     # plugin manifest and hooks module
+claude plugin test plugins/qa-guide         # 50 tests on terminal and desktop surfaces
 npx -y -p typescript@5 tsc -p plugins/qa-guide --noEmit
-claude plugin validate plugins/qa-guide
 ```
 
-Type checking requires the engine-generated, gitignored types in `plugins/qa-guide/.claude-plugin/types/`. Claude Code writes these files when it loads the local plugin. Start a new local development session after upgrading Claude Code to refresh them.
+Type checking needs the engine-written declarations in `plugins/qa-guide/.claude-plugin/types/`. They are gitignored, and Claude Code writes them the first time it loads the plugin from your checkout. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
-## 日本語
+## Contributing
 
-**qa-guide** は、Claude の質問の背景・選択肢・回答履歴をペインに表示します。質問中のコンパクト表示は背景説明だけに絞り、質問文・選択肢・プレビューは質問ダイアログで確認します。AI 解説は表示行数の約65%まで、最新の指示は折り返して2行まで表示し、残りに直前の Claude の説明の末尾を表示します。AI 解説の選択肢はダイアログと同じ順序・番号で、番号をシアン、ラベルを太字、おすすめを緑の太字で表示します。複数の質問は Q 見出しで分け、質問ごとに1から番号を振ります。折り返しは番号の後に揃え、余裕があるときは見出しの前に空行を入れます。行数が少ないときは本文を優先します。AI がオフ・生成中の場合は指示と直前の説明に行数を回し、スクロールなしで読める範囲に収めます。
+Issues and pull requests are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). To report a security issue, follow [SECURITY.md](SECURITY.md).
 
-回答・キャンセル後の全文表示では、選択中の質問の指示・背景・選択肢・✔回答を確認できます。`/qa-guide` で開き、ペインにフォーカスした状態で `p`（◀ 前）で古い質問、`n`（次 ▶）で新しい質問、`l`（最新）で最新の質問へ移動します。ツールバーには `3/7` のような位置が表示されます。`h` で履歴を開くと、各質問のボタンから直接移動でき、選択中の質問に印が付きます。新しい質問が来ると最新に戻ります。`a` は AI 解説の切り替え、閉じるボタンはペインを閉じます。AI 解説には追加のモデル利用料金がかかります。全画面・幅広のターミナルを推奨します。
+## Credits
+
+- Demo video narration: Irodori-TTS v4-Large (Gemma Terms of Use)
+- Demo video music and sound effects: original, synthesized for this project
+- Screenshots and the demo video were captured in a throwaway demo project
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE) © aieo-product

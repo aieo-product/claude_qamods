@@ -1,0 +1,41 @@
+name: hygiene
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Manifests are valid JSON with the required fields
+        run: |
+          set -euo pipefail
+          jq -e '.name and .owner.name and (.plugins | length > 0)' .claude-plugin/marketplace.json
+          jq -e '.name == "qa-guide" and .version and .license' plugins/qa-guide/.claude-plugin/plugin.json
+          jq -e '.modules | length == 1' plugins/qa-guide/hooks/hooks.json
+      - name: Plugin and marketplace versions match
+        run: |
+          set -euo pipefail
+          a=$(jq -r '.version' plugins/qa-guide/.claude-plugin/plugin.json)
+          b=$(jq -r '.plugins[] | select(.name == "qa-guide") | .version' .claude-plugin/marketplace.json)
+          test "$a" = "$b" || { echo "plugin.json $a != marketplace.json $b"; exit 1; }
+
+  privacy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No local paths, emails or session ids in tracked text files
+        run: |
+          set -euo pipefail
+          pattern='(/Users/[A-Za-z0-9._-]+|/home/[A-Za-z0-9._-]+/|[A-Za-z]:\\Users\\|/private/tmp/|/Volumes/[A-Za-z0-9._-]+/|session_[0-9A-Za-z]{16,}|[A-Za-z0-9._%+-]+@(gmail|yahoo|outlook|hotmail|icloud)\.com)'
+          if git grep -nIE "$pattern" -- . ':!.github/workflows/hygiene.yml' ':!CONTRIBUTING.md'; then
+            echo "::error::Personal data or local paths found (see above)."
+            exit 1
+          fi
+          echo "clean"
