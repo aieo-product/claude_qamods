@@ -35,13 +35,14 @@ Claude's question dialog shows a question and a few short options. After a long 
 
 **While a question is open** (compact view, fits the pane without scrolling)
 
-- **AI explanation**, generated in the background from the session's own transcript:
+- **AI explanation**, generated in the background from a compact summary of the session by default:
   - a summary of the instructions Claude is currently working under
   - why Claude is asking now
   - the effect of each option, numbered exactly like the dialog
   - a one-line recommendation
 - **Your recent instructions.** Only prompts you typed are shown. Task notifications and other engine messages are left out.
 - **The tail of Claude's explanation** leading up to the question.
+- A **Full context** button to regenerate the explanation using the whole session. It appears when the pane has room; the AI heading shows `compact context` or `full context`.
 - The question text and options are not repeated. They are already in the dialog.
 
 **After you answer** (full view)
@@ -69,7 +70,7 @@ Run these commands inside Claude Code:
 /plugin install qa-guide@claude-qamods
 ```
 
-The installer may print `1 userConfig option not yet set`. You can ignore it: the `language` option defaults to `auto`. To pick a language, run `/plugin configure qa-guide@claude-qamods` or use `/config`.
+The installer may report unset `userConfig` options. You can ignore this: `language` defaults to `auto` and `context` defaults to `compact`. To change either option, run `/plugin configure qa-guide@claude-qamods` or use `/config`.
 
 To update, run `/plugin marketplace update claude-qamods` and then `/plugin update qa-guide@claude-qamods`. To remove it, run `/plugin uninstall qa-guide@claude-qamods`.
 
@@ -83,6 +84,10 @@ The default language option is `auto`. A question or option label containing hir
 
 Run `/config` and set qa-guide's `language` option to `en` or `ja` to choose a fixed language, or `auto` to restore automatic selection. Before any question exists, automatic selection uses Claude Code's language setting when available (Japanese selects Japanese; other languages select English), then the locale (`LC_ALL`, or `LANG` when `LC_ALL` is empty). A locale starting with `ja` selects Japanese; otherwise, the fallback is English.
 
+![A compact-context explanation with the Full context button](docs/images/compact-context.png)
+
+The `context` option defaults to `compact`: explanations use a bounded summary and Haiku, so their input does not grow with the session. Set `context` to `full` in `/config` to use the whole session for every new explanation. For one question, choose **Full context** to replace its explanation with a new one using the whole session. The button can be clicked on surfaces that support clicks. After answering, focus the pane and press `f`.
+
 | Control | Where | Action |
 | --- | --- | --- |
 | `/qa-guide` | prompt | Open the guide (also before the first question) |
@@ -90,6 +95,7 @@ Run `/config` and set qa-guide's `language` option to `en` or `ja` to choose a f
 | `l` | pane focused | Back to the latest question |
 | `h` | pane focused | Show or hide the history list |
 | `a` | pane focused | Turn AI explanations on or off for the next questions |
+| `f` / **Full context** | pane focused / button | Regenerate the selected question's explanation using the whole session |
 | `Ctrl+X` then `Tab`, or click | anywhere | Move keyboard focus into the pane |
 | `Esc` | pane focused | Return focus to the prompt |
 
@@ -106,24 +112,27 @@ qa-guide is a single hooks module, `plugins/qa-guide/hooks/register.tsx`:
 | `ui.render` (`Pane`) | Draws the compact view while the question is open and the full view afterwards |
 | `session.start` / `command.run` | Registers and handles `/qa-guide` |
 
-The AI explanation uses `$.model.fork`, which asks one tool-less question over the session's existing transcript. The answer arrives while you are still reading, and the dialog is never held back. If Claude asks before the session has produced its first response, there is no transcript to fork yet. In that case qa-guide asks `haiku` once through `$.model.complete`, using only your recent instructions, Claude's text before the question, and the question itself. State lives in `$.state`, so it survives a hot reload but not the end of the session.
+By default, the AI explanation uses `$.model.complete` with `model: 'haiku'` and an output limit of 1,500 tokens. Its compact prompt contains qa-guide's instructions, your last 3 prompts (up to 600 characters each), the tail of Claude's lead-up text (up to 2,500 characters), a summary of tool activity since your last real prompt (the last 12 tool uses, each tool name and first string input clipped to 120 characters), and the questions. The entire prompt is capped at 12,000 characters, regardless of transcript size.
+
+With `context: full` or **Full context**, qa-guide uses `$.model.fork` to ask one tool-less question over the session's existing transcript on the session's model. If Claude asks before the session has produced its first response, there is no transcript to fork yet, so this path falls back to a short `haiku` completion. The explanation arrives while you are still reading, and the dialog is never held back. A newer explanation replaces the selected entry's previous explanation; late results from an older run are ignored. State lives in `$.state`, so it survives a hot reload but not the end of the session.
 
 ## Privacy and cost
 
-- **Nothing leaves your session.** qa-guide sends no network requests of its own. The AI explanation is one extra request through Claude Code, on the account the session already uses: a fork of the same transcript on the session's model, or, for a question asked before the first response, a short `haiku` request with the instructions and question text.
+- **Requests go through Claude Code.** qa-guide sends no network requests of its own. AI explanations use the account the session already uses. The default sends Haiku only the bounded compact prompt described above. Choosing **Full context** or setting `context: full` sends the whole session transcript to the session's model through a fork; if no transcript exists yet, it falls back to a short Haiku completion.
 - **Nothing is written to disk.** Prompts, questions and answers are kept in session memory (`$.state`) and are gone when the session ends.
-- **Cost.** Each question with AI explanations on adds one model call. Press `a` to turn explanations off; the pane itself never calls a model.
+- **Cost.** Each question with AI explanations on adds one model call. Each **Full context** request adds another call. Press `a` to turn automatic explanations off; rendering the pane alone never calls a model.
 
 ### Token usage per question
 
 | | What is sent | Approximate tokens |
 | --- | --- | --- |
 | **Pane (no AI)** | Nothing. Your recent prompts and Claude's lead-up text are read from the local session. | 0 |
-| **AI explanation (normal)** | A fork of the whole session transcript, plus qa-guide's instructions, your last 3 prompts (up to 600 characters each) and the question. | Transcript: read from the prompt cache (as many tokens as the session holds).<br>Added input: ~1,000–3,000.<br>Output: ~500–1,000, more if the model thinks. |
-| **AI explanation (fallback)** | Only when Claude asks before its first response: qa-guide's instructions, your prompts, the last 2,500 characters of Claude's text, and the question. No transcript. | Input: ~1,500–4,000.<br>Output: up to 1,500. |
+| **AI explanation (compact, default)** | Instructions, last 3 prompts (600 characters each), Claude's lead-up text (last 2,500 characters), last 12 tool summaries (120 characters each), and questions. The whole prompt is capped at 12,000 characters; the full transcript is not sent. | Input: typically ~1,500–4,000, independent of session length (tokens vary by language and content).<br>Output: up to 1,500. |
+| **AI explanation (full context)** | A fork of the whole session transcript, plus qa-guide's instructions, your last 3 prompts (up to 600 characters each) and the question. Used by `context: full` and the **Full context** button. | Transcript: read from the prompt cache (as many tokens as the session holds).<br>Added input: ~1,000–3,000.<br>Output: ~500–1,000, more if the model thinks. |
+| **Full-context fallback** | Only when there is no transcript to fork yet: a short prompt with the recent instructions, Claude's lead-up text and the questions. | Input: typically ~1,500–4,000.<br>Output: up to 1,500. |
 
-- **Which model.** The fork always runs on the model your session is using right now, so switching with `/model` (or a newer default in Claude Code) changes it too. The fallback uses the `haiku` alias, which Claude Code resolves to its current Haiku model.
-- **Cache misses.** The fork's transcript prefix is identical to the session's last request, so it is normally served from the prompt cache. If the cache has expired, or right after `/model`, the whole transcript is processed as fresh input once.
+- **Which model.** Compact explanations and the full-context fallback use the `haiku` alias, which Claude Code resolves to its current Haiku model. Full-context forks run on the model your session is using right now, so switching with `/model` changes them too.
+- **Cache misses in full context.** The fork's transcript prefix is identical to the session's last request, so it is normally served from the prompt cache. If the cache has expired, or right after `/model`, the whole transcript is processed as fresh input once. Compact mode never forks the transcript.
 - **Plans.** With a Pro or Max subscription these tokens count against your usage limits rather than being billed per token.
 
 ## Troubleshooting

@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-05
+
+### Added
+
+- `context` option in `/config`: `compact` (default) or `full`
+- **Full context** / **全文脈で解説** button (`f`) to replace the selected question's explanation using the whole session
+- Context mode labels on AI explanations: `compact context` / `full context` and 「要点のみ」 / 「全文脈」; older entries display as full context
+
+### Changed
+
+- Default AI explanations use Haiku with a compact prompt capped at 12,000 characters and output capped at 1,500 tokens, independent of session length
+- Compact context includes the last 3 user prompts, Claude's lead-up text, the last 12 tool summaries since the latest real user prompt, and the questions
+- Full context retains the session-model fork and the Haiku fallback when no transcript exists yet
+- English and Japanese documentation now explain context settings, the button, privacy and token usage
+
+### Fixed
+
+- Late results from superseded explanation runs no longer replace a newer explanation
+
 ## [0.2.0] - 2026-10-04
 
 ### Added
@@ -33,6 +52,7 @@ All notable changes to this project are documented here. The format follows [Kee
   - `/qa-guide` command, AI explanation toggle (`a`)
 - Marketplace manifest `claude-qamods`
 
-[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/aieo-product/claude_qamods/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/aieo-product/claude_qamods/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/aieo-product/claude_qamods/releases/tag/v0.1.0

@@ -14,6 +14,7 @@ export type QaEntry = {
   userPrompts: string[]
   lead: string
   questions: QaQuestion[]
+  explainMode: 'compact' | 'full'
   explainState: 'pending' | 'done' | 'error' | 'off'
   explanation: string
   status: 'open' | 'answered' | 'cancelled'

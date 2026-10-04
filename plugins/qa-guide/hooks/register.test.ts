@@ -1,8 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import type { ConfigRow, ModelForkResult, On, PaneOpenArgs, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionMessage, ToolCallResult, UiScrollArgs } from 'claude-code'
+import type { ConfigRow, ModelCompleteRequest, ModelCompleteResult, ModelForkResult, On, PaneOpenArgs, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionMessage, ToolCallResult, UiScrollArgs } from 'claude-code'
 
-import { openQuestionPane } from './register'
+import { buildCompactContext, openQuestionPane } from './register'
 import type { QaEntry } from '../types'
 
 const SURFACES = ['terminal', 'desktop'] as const
@@ -36,7 +36,7 @@ for (const { name, question, labels, lang } of DETECTION_CASES) {
     expect(calls.savedEntries[0]).toHaveProperty('lang', lang)
     expect(calls.opened).toEqual([{ id: 'qa-guide', title: lang === 'ja' ? '質問ガイド' : 'Question guide' }])
     expect(calls.languageLookups).toEqual([])
-    expect(calls.forkPrompts[0]).toContain(lang === 'ja' ? '### いまの指示（概要）' : '### Current instructions')
+    expect(calls.completePrompts[0]).toContain(lang === 'ja' ? '### いまの指示（概要）' : '### Current instructions')
   })
 }
 
@@ -48,7 +48,7 @@ test('automatic language ignores kana in headers, descriptions, previews and con
   await ask($, [{ ...QUESTIONS[0]!, header: 'データベース', options: [{ label: 'SQLite', description: 'かんたん', preview: 'プレビュー' }, QUESTIONS[0]!.options[1]!] }])
   await calls.clock.settle()
   expect(calls.savedEntries[0]).toHaveProperty('lang', 'en')
-  expect(calls.forkPrompts[0]).toContain('### Current instructions')
+  expect(calls.completePrompts[0]).toContain('### Current instructions')
   expect(calls.languageLookups).toEqual([])
 })
 
@@ -83,6 +83,9 @@ const PANE_PROPS: RenderPropsOf['Pane'] = {
 type Calls = {
   fork: number
   forkPrompts: string[]
+  complete: number
+  completePrompts: string[]
+  completeRequests: ModelCompleteRequest[]
   submitted: PromptSubmitInput[]
   savedPrompts: string[]
   savedEntries: QaEntry[]
@@ -98,9 +101,14 @@ type Calls = {
 
 type EngineOptions = {
   isPlaced?: boolean
-  forkDelay?: number
+  completeDelay?: number
   toolDelay?: number
+  completeReply?: ModelCompleteResult
+  completeThrows?: boolean
   forkReply?: ModelForkResult
+  forkDelay?: number
+  forkReplies?: ModelForkResult[]
+  forkDelays?: number[]
   toolError?: boolean
   toolThrows?: boolean
   agentMessages?: SessionMessage[]
@@ -122,12 +130,15 @@ const EXPLANATION = {
     cache_creation_input_tokens: 0,
     cache_read_input_tokens: 0,
   },
-} satisfies ModelForkResult
+} satisfies ModelCompleteResult
 
 function engineBeneath(on: On, answers: Record<string, string> | 'deny', options: EngineOptions = {}): Calls {
   const calls: Calls = {
     fork: 0,
     forkPrompts: [],
+    complete: 0,
+    completePrompts: [],
+    completeRequests: [],
     submitted: [],
     savedPrompts: [],
     savedEntries: [],
@@ -189,12 +200,23 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
     calls.submitted.push(e)
     return { text: e.text, context: e.context, origin: e.origin }
   })
+  on('model.complete', async (_$, e) => {
+    calls.complete += 1
+    calls.completePrompts.push(e.prompt)
+    calls.completeRequests.push(e)
+    calls.order.push('complete')
+    if (options.completeDelay) await calls.clock.sleep(options.completeDelay)
+    if (options.completeThrows) throw new Error('Demo completion refused.')
+    return { value: options.completeReply ?? EXPLANATION }
+  })
   on('model.fork', async (_$, e) => {
     calls.fork += 1
     calls.forkPrompts.push(e.prompt)
     calls.order.push('fork')
-    if (options.forkDelay) await calls.clock.sleep(options.forkDelay)
-    return { value: options.forkReply ?? EXPLANATION }
+    const delay = options.forkDelays?.[calls.fork - 1] ?? options.forkDelay
+    const reply = options.forkReplies?.[calls.fork - 1] ?? options.forkReply ?? EXPLANATION
+    if (delay) await calls.clock.sleep(delay)
+    return { value: reply }
   })
   on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e): Promise<ToolCallResult<'AskUserQuestion'>> => {
     calls.order.push('tool')
@@ -215,6 +237,19 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
 
 const ask = ($: Engine, questions: Questions = QUESTIONS, id = 'toolu_1') =>
   $.tool.call({ tool: 'AskUserQuestion', tool_use_id: id, questions })
+
+test('compact context is the default and calls only a bounded Haiku completion', async ($, on) => {
+  const calls = engineBeneath(on, {})
+  const requests = calls.completeRequests
+  await ask($)
+  await calls.clock.settle()
+  expect(requests).toHaveLength(1)
+  expect(requests[0]?.model).toBe('haiku')
+  expect(requests[0]?.maxTokens).toBe(1500)
+  expect(requests[0]!.prompt.length).toBeLessThanOrEqual(12000)
+  expect(calls.fork).toBe(0)
+  expect(calls.savedEntries[0]).toHaveProperty('explainMode', 'compact')
+})
 
 const submit = ($: Engine, text: string, origin: PromptOrigin = { kind: 'composer' }) =>
   $.prompt.submit({ text, origin, wait: false })
@@ -245,7 +280,7 @@ const LONG_LEAD = [
   'LEAD_TAIL: decide the next step now.',
 ].join('\n')
 
-const LONG_EXPLANATION: ModelForkResult = {
+const LONG_EXPLANATION: ModelCompleteResult = {
   ...EXPLANATION,
   text: [
     'AI_ORIGIN: why this decision matters.',
@@ -272,7 +307,7 @@ const NUMBERED_QUESTIONS: Questions = [
   },
 ]
 
-const NUMBERED_EXPLANATION: ModelForkResult = {
+const NUMBERED_EXPLANATION: ModelCompleteResult = {
   ...EXPLANATION,
   text: [
     '### いまの指示（概要）',
@@ -298,6 +333,11 @@ const NUMBERED_EXPLANATION: ModelForkResult = {
 function compactTextRows(tree: unknown): Array<{ props: Record<string, unknown>; text: string }> {
   if (!tree || typeof tree !== 'object') return []
   const node = tree as { type: string; props?: Record<string, unknown>; children?: unknown[] }
+  if (node.type === 'Button') {
+    expect(node.props?.key).toBe('deep')
+    expect(node.props?.plain).toBe(true)
+    return [{ props: node.props ?? {}, text: String(node.props?.label ?? '') }]
+  }
   if (node.type === 'Text') {
     const textOf = (value: unknown): string => {
       if (typeof value === 'string' || typeof value === 'number') return String(value)
@@ -315,6 +355,232 @@ function compactTextRows(tree: unknown): Array<{ props: Record<string, unknown>;
     expect(props[name] ?? 0).toBe(0)
   }
   return (node.children ?? []).flatMap(compactTextRows)
+}
+
+const toolSummaryMessages = (): SessionMessage[] => [
+  { role: 'user', text: 'OLD_REQUEST: use a temporary demo.', toolUses: [] },
+  { role: 'assistant', text: 'OLD_TRANSCRIPT: background', toolUses: [
+    { tool_use_id: 'demo_old', tool: 'Read', input: { file_path: 'old-demo.ts' } },
+  ] },
+  { role: 'user', text: 'CURRENT_REQUEST: build a demo board.', toolUses: [] },
+  { role: 'assistant', text: 'LEAD_HEAD: ' + 'background '.repeat(100000) + ' LEAD_TAIL: choose storage.', toolUses:
+    Array.from({ length: 16 }, (_, i) => ({
+      tool_use_id: `demo_tool_${i}`,
+      tool: i === 15 ? 'Read' : 'Bash',
+      input: { limit: 10, command: `DEMO_COMMAND_${i}: ${'detail '.repeat(40)}`, ignored: 'SECOND_FIELD_MUST_NOT_APPEAR' },
+      text: 'TOOL_OUTPUT_MUST_NOT_APPEAR',
+      result: { stdout: 'TOOL_RESULT_MUST_NOT_APPEAR' },
+    })),
+  },
+  { role: 'user', text: 'TOOL_RESULT_ROW_MUST_NOT_RESET_CONTEXT', toolUses: [], toolResults: [
+    { tool_use_id: 'demo_tool_15', text: 'tool output', isError: false },
+  ] },
+  { role: 'user', text: '<task-notification>DEMO_NOTIFICATION</task-notification>', toolUses: [] },
+]
+
+test('buildCompactContext is pure and bounds prompts, lead, tools and the total prompt', () => {
+  const messages = toolSummaryMessages()
+  const prompts = ['OLD_PROMPT', 'FIRST_RECENT', 'SECOND_RECENT', 'LATEST_RECENT ' + 'p'.repeat(900)]
+  const lead = messages[3]!.text
+  const before = JSON.stringify({ messages, prompts, lead, questions: QUESTIONS })
+  const prompt = buildCompactContext(messages, prompts, lead, QUESTIONS, 'en')
+  expect(prompt.length).toBeLessThanOrEqual(12000)
+  expect(prompt).toContain('### Current instructions')
+  expect(prompt).toContain('FIRST_RECENT')
+  expect(prompt).toContain('SECOND_RECENT')
+  expect(prompt).toContain(prompts[3]!.slice(0, 600))
+  expect(prompt).not.toContain(prompts[3]!.slice(0, 601))
+  expect(prompt).not.toContain('OLD_PROMPT')
+  expect(prompt).toContain('LEAD_TAIL: choose storage.')
+  expect(prompt).not.toContain('LEAD_HEAD')
+  expect(prompt).not.toContain('OLD_TRANSCRIPT')
+  expect(prompt).not.toContain('old-demo.ts')
+  expect(prompt).not.toContain('DEMO_COMMAND_3:')
+  for (let i = 4; i < 16; i++) expect(prompt).toContain(`DEMO_COMMAND_${i}:`)
+  const summaries = prompt.split('\n').filter(line => /^(Bash|Read):/.test(line))
+  expect(summaries).toHaveLength(12)
+  for (const summary of summaries) expect(summary.length).toBeLessThanOrEqual(120)
+  expect(summaries[0]).toContain('Bash: DEMO_COMMAND_4:')
+  expect(summaries[11]).toContain('Read: DEMO_COMMAND_15:')
+  expect(prompt).not.toContain('SECOND_FIELD_MUST_NOT_APPEAR')
+  expect(prompt).not.toContain('TOOL_OUTPUT_MUST_NOT_APPEAR')
+  expect(prompt).not.toContain('TOOL_RESULT_MUST_NOT_APPEAR')
+  expect(prompt).toContain(JSON.stringify(QUESTIONS, null, 1))
+  expect(prompt.indexOf('DEMO_COMMAND_15:')).toBeLessThan(prompt.indexOf(JSON.stringify(QUESTIONS, null, 1)))
+  expect(JSON.stringify({ messages, prompts, lead, questions: QUESTIONS })).toBe(before)
+})
+
+test('buildCompactContext caps oversized questions and tool names as well as transcript data', () => {
+  const messages: SessionMessage[] = [{ role: 'assistant', text: '', toolUses: [
+    { tool_use_id: 'demo_large', tool: 'DemoTool'.repeat(200), input: { data: 'a'.repeat(10000) } },
+  ] }]
+  const questions = [{ ...QUESTIONS[0]!, question: 'Large demo question ' + 'q'.repeat(40000) }]
+  const prompt = buildCompactContext(messages, ['Demo prompt ' + 'p'.repeat(10000)], 'Demo lead ' + 'l'.repeat(10000), questions)
+  expect(prompt.length).toBeLessThanOrEqual(12000)
+  expect(prompt).toContain('Demo prompt')
+  expect(prompt).toContain('Large demo question')
+})
+
+test('compact completion includes bounded context from a one megabyte transcript', async ($, on) => {
+  const calls = engineBeneath(on, {}, { messages: toolSummaryMessages() })
+  for (const prompt of ['RECORDED_FIRST', 'RECORDED_SECOND', 'RECORDED_LATEST']) await submit($, prompt)
+  await ask($)
+  await calls.clock.settle()
+  expect(calls.fork).toBe(0)
+  expect(calls.completeRequests).toHaveLength(1)
+  const request = calls.completeRequests[0]!
+  expect(request.model).toBe('haiku')
+  expect(request.maxTokens).toBe(1500)
+  expect(request.prompt.length).toBeLessThanOrEqual(12000)
+  for (const text of ['RECORDED_FIRST', 'RECORDED_SECOND', 'RECORDED_LATEST', 'LEAD_TAIL', 'Bash: DEMO_COMMAND_4:', 'Read: DEMO_COMMAND_15:', QUESTIONS[0]!.question]) {
+    expect(request.prompt).toContain(text)
+  }
+  expect(request.prompt).not.toContain('OLD_TRANSCRIPT')
+})
+
+for (const lang of ['en', 'ja'] as const) {
+  for (const surface of SURFACES) {
+    test(`a narrow completed ${lang} compact pane retains its dim context tag on ${surface}`, { options: { language: lang } }, async ($, on) => {
+      const calls = engineBeneath(on, {}, {
+        toolDelay: 1000, messages: [],
+        completeReply: { ...EXPLANATION, text: lang === 'en' ? '### Current instructions\nDemo guidance.' : '### いまの指示（概要）\nデモの解説。' },
+      })
+      const asked = ask($)
+      await calls.clock.settle()
+      const props = { ...COMPACT_PROPS, bodyColumns: 40 }
+      const ui = await mountPane($, surface, props)
+      expect((await ui.find({ type: 'Text', text: lang === 'en' ? /^compact context$/ : /^要点のみ$/ }))?.props.dimColor).toBe(true)
+      const rows = compactTextRows(await ui.drawn())
+      expect(rows.length).toBeLessThanOrEqual(props.scroll!.bodyRows)
+      for (const row of compactTextRows(await ui.find({ key: 'compact-ai' }))) {
+        expect([...row.text].length).toBeLessThanOrEqual(40)
+      }
+      await ui.unmount()
+      await calls.clock.advance(1000)
+      await asked
+    })
+  }
+
+  for (const status of ['open', 'answered'] as const) {
+    test(`legacy ${status} entries default to the ${lang} full context tag`, async ($, on) => {
+      engineBeneath(on, {})
+      const legacy: Omit<QaEntry, 'explainMode'> = {
+        id: 'demo_legacy', lang, askedAt: 1, userPrompts: [], lead: '', questions: QUESTIONS,
+        explainState: 'done', explanation: '### Demo\nLegacy guidance.', status, answers: {},
+      }
+      on('state.get', { plugin: 'qa-guide', key: 'entries' }, () => ({ value: { value: [legacy], version: 1 } }) as never)
+      for (const surface of SURFACES) {
+        const ui = await mountPane($, surface)
+        expect((await ui.find({ type: 'Text', text: lang === 'en' ? /^full context$/ : /^全文脈$/ }))?.props.dimColor).toBe(true)
+        await ui.unmount()
+      }
+    })
+  }
+
+  test(`full context option forks and renders the ${lang} tag on each surface`, { options: { context: 'full', language: lang } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    await ask($)
+    await calls.clock.settle()
+    expect(calls.fork).toBe(1)
+    expect(calls.complete).toBe(0)
+    expect(calls.savedEntries[0]).toHaveProperty('explainMode', 'full')
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      expect((await ui.find({ type: 'Text', text: lang === 'en' ? /^full context$/ : /^全文脈$/ }))?.props.dimColor).toBe(true)
+      await ui.unmount()
+    }
+  })
+
+  test(`Full context replaces the selected entry and ${lang} compact tag on each surface`, { options: { language: lang } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, { forkReply: { ...EXPLANATION, text: 'FULL_DEMO: use the whole session.' } })
+    await ask($, QUESTIONS, 'demo_first')
+    await ask($, QUESTIONS, 'demo_latest')
+    await calls.clock.settle()
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      // Choose a different compact entry on each surface to check selection.
+      if (surface === 'terminal') await ui.press({ key: 'prev' })
+      else await ui.press({ key: 'latest' })
+      const id = surface === 'terminal' ? 'demo_first' : 'demo_latest'
+      expect((await ui.find({ type: 'Text', text: lang === 'en' ? /^compact context$/ : /^要点のみ$/ }))?.props.dimColor).toBe(true)
+      const button = await ui.find({ key: 'deep' })
+      expect(button?.type).toBe('Button')
+      expect(button?.props.hotkey).toBe('f')
+      expect(button?.props.label).toBe(lang === 'en' ? 'Full context' : '全文脈で解説')
+      await ui.press({ key: 'deep' })
+      expect(calls.savedEntries.find(entry => entry.id === id)).toMatchObject({ explainMode: 'full', explainState: 'done', explanation: 'FULL_DEMO: use the whole session.' })
+      expect((await ui.find({ type: 'Text', text: lang === 'en' ? /^full context$/ : /^全文脈$/ }))?.props.dimColor).toBe(true)
+      expect(await ui.find({ type: 'Markdown', text: /FULL_DEMO/ })).toBeDefined()
+      expect(await ui.find({ type: 'Markdown', text: /DB choice/ })).toBeUndefined()
+      await ui.unmount()
+    }
+    expect(calls.fork).toBe(2)
+    expect(calls.complete).toBe(2)
+  })
+
+  for (const surface of SURFACES) {
+    test(`compact ${lang} pane offers Full context only in spare rows on ${surface}`, { options: { language: lang } }, async ($, on) => {
+      const calls = engineBeneath(on, {}, { toolDelay: 1000, messages: [], completeReply: { ...EXPLANATION, text: '### Demo\nCOMPACT_DEMO' }, forkReply: { ...EXPLANATION, text: '### Demo\nFULL_DEMO' } })
+      const asked = ask($)
+      await calls.clock.settle()
+      const ui = await mountPane($, surface, COMPACT_PROPS)
+      expect((await ui.find({ type: 'Text', text: lang === 'en' ? /^compact context$/ : /^要点のみ$/ }))?.props.dimColor).toBe(true)
+      expect((await ui.find({ key: 'deep' }))?.props.hotkey).toBe('f')
+      const drawn = await ui.drawn()
+      expect(compactTextRows(drawn).length).toBeLessThanOrEqual(COMPACT_PROPS.scroll!.bodyRows)
+      const keys = (drawn.type === 'Box' ? drawn.children ?? [] : []).map(node =>
+        typeof node === 'object' && (node.type === 'Box' || node.type === 'Button') ? node.props?.key : undefined)
+      expect(keys.indexOf('deep')).toBeGreaterThan(keys.indexOf('compact-ai'))
+      await ui.press({ key: 'deep' })
+      expect(calls.fork).toBe(1)
+      expect(calls.savedEntries[0]).toMatchObject({ explainMode: 'full', explanation: '### Demo\nFULL_DEMO' })
+      expect((await ui.find({ type: 'Text', text: lang === 'en' ? /^full context$/ : /^全文脈$/ }))?.props.dimColor).toBe(true)
+      expect(compactTextRows(await ui.drawn()).length).toBeLessThanOrEqual(COMPACT_PROPS.scroll!.bodyRows)
+      await ui.unmount()
+      await calls.clock.advance(1000)
+      await asked
+    })
+
+    for (const outcome of ['answered', 'failure', 'rejection'] as const) {
+      test(`superseded ${lang} compact ${outcome} cannot replace Full context on ${surface}`, { options: { language: lang } }, async ($, on) => {
+        const calls = engineBeneath(on, {}, {
+          toolDelay: 100, completeDelay: 1000, completeThrows: outcome === 'rejection',
+          forkReply: { ...EXPLANATION, text: 'WINNING_FULL_DEMO' },
+          completeReply: outcome === 'answered' ? { ...EXPLANATION, text: 'STALE_COMPACT_DEMO' } : { isAnswered: false, reason: 'empty-reply', usage: EXPLANATION.usage },
+        })
+        const asked = ask($)
+        await calls.clock.settle()
+        await calls.clock.advance(100)
+        await asked
+        const ui = await mountPane($, surface)
+        await ui.press({ key: 'deep' })
+        await calls.clock.advance(900)
+        expect(calls.savedEntries[0]).toMatchObject({ explainMode: 'full', explainState: 'done', explanation: 'WINNING_FULL_DEMO' })
+        expect(await ui.find({ type: 'Markdown', text: /^WINNING_FULL_DEMO$/ })).toBeDefined()
+        expect(await ui.find({ text: /STALE_COMPACT_DEMO|empty-reply/ })).toBeUndefined()
+        await ui.unmount()
+      })
+    }
+
+    test(`a later ${lang} full run supersedes an earlier full run on ${surface}`, { options: { language: lang } }, async ($, on) => {
+      const calls = engineBeneath(on, {}, {
+        forkDelays: [1000, 0],
+        forkReplies: [{ ...EXPLANATION, text: 'STALE_FULL_DEMO' }, { ...EXPLANATION, text: 'LATEST_FULL_DEMO' }],
+      })
+      await ask($)
+      const ui = await mountPane($, surface)
+      const earlier = ui.press({ key: 'deep' })
+      await calls.clock.settle()
+      const later = ui.press({ key: 'deep' })
+      await calls.clock.settle()
+      await calls.clock.advance(1000)
+      await Promise.all([earlier, later])
+      expect(calls.fork).toBe(2)
+      expect(calls.savedEntries[0]).toMatchObject({ explainMode: 'full', explainState: 'done', explanation: 'LATEST_FULL_DEMO' })
+      expect(await ui.find({ text: /STALE_FULL_DEMO/ })).toBeUndefined()
+      await ui.unmount()
+    })
+  }
 }
 
 test('prompt submission records only the person origins and forwards every original input unchanged', { options: { language: 'ja' } }, async ($, on) => {
@@ -388,7 +654,7 @@ test('a failed prompt history write still forwards the person prompt unchanged',
   expect(failedWrites).toBe(1)
 })
 
-test('questions snapshot the latest three recorded prompts in order and include them as quoted fork data', { options: { language: 'ja' } }, async ($, on) => {
+test('questions snapshot the latest three recorded prompts in order and include them as quoted compact data', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, { messages: [
     { role: 'user', text: '<task-notification>Background demo task finished.</task-notification>', toolUses: [] },
     { role: 'assistant', text: 'Now choose demo storage.', toolUses: [] },
@@ -404,7 +670,7 @@ test('questions snapshot the latest three recorded prompts in order and include 
   await ask($)
 
   expect(calls.savedEntries[0]?.userPrompts).toEqual(prompts.slice(-3))
-  const forkPrompt = calls.forkPrompts[0] ?? ''
+  const forkPrompt = calls.completePrompts[0] ?? ''
   expect(forkPrompt).toContain('### いまの指示（概要）')
   expect(forkPrompt.indexOf('### いまの指示（概要）')).toBeLessThan(forkPrompt.indexOf('### なぜ聞いているか'))
   for (const prompt of prompts.slice(-3)) {
@@ -429,11 +695,11 @@ test('questions snapshot the latest three recorded prompts in order and include 
   await calls.clock.settle()
 })
 
-test('the fork prompt requires short numbered guidance in dialog order for each question', { options: { language: 'ja' } }, async ($, on) => {
+test('the compact prompt requires short numbered guidance in dialog order for each question', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {})
   await ask($, NUMBERED_QUESTIONS)
   await calls.clock.settle()
-  const prompt = calls.forkPrompts[0] ?? ''
+  const prompt = calls.completePrompts[0] ?? ''
   const headings = ['### いまの指示（概要）', '### なぜ聞いているか', '### 選択肢ごとの影響', '### おすすめ']
   for (const [i, heading] of headings.entries()) {
     expect(prompt).toContain(heading)
@@ -487,7 +753,7 @@ test('session fallback keeps the latest three person rows and skips XML, empty a
 })
 
 test('an open pane shows only the newest composer instruction on at most two compact lines', { options: { language: 'ja' } }, async ($, on) => {
-  const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 10, messages: [
+  const calls = engineBeneath(on, {}, { toolDelay: 1000, completeDelay: 10, messages: [
     { role: 'user', text: '<task-notification>Demo task finished.</task-notification>', toolUses: [] },
   ] })
   await submit($, 'OLDER_DEMO: build a task board.')
@@ -507,7 +773,7 @@ test('an open pane shows only the newest composer instruction on at most two com
     expect(joinRows(instructions.map(row => row.text))).toContain('NEWEST_DEMO: explain the database tradeoffs.')
     expect(joinRows(instructions.map(row => row.text))).toContain('Keep the answer concise.')
     for (const row of instructions) {
-      expect(row.props.wrap).toBe('truncate-end')
+      if (row.props.key !== 'deep') expect(row.props.wrap).toBe('truncate-end')
       expect(row.text).not.toContain('\n')
     }
     expect(await ui.find({ text: /OLDER_DEMO|MIDDLE_DEMO|<task-notification>/ })).toBeUndefined()
@@ -521,8 +787,8 @@ test('an open pane shows only the newest composer instruction on at most two com
 test('compact AI guidance strips Markdown markers, styles headings and keeps readable bullets', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000,
-    forkDelay: 10,
-    forkReply: { ...EXPLANATION, text: [
+    completeDelay: 10,
+    completeReply: { ...EXPLANATION, text: [
       '### いまの指示（概要）',
       '**Build a demo task board.**',
       'Keep storage local and explain tradeoffs.',
@@ -563,7 +829,7 @@ test('compact AI guidance strips Markdown markers, styles headings and keeps rea
 })
 
 test('compact numbered guidance has cyan number chips, bold labels and green recommendations on each surface', { options: { language: 'ja' } }, async ($, on) => {
-  const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 10, forkReply: NUMBERED_EXPLANATION })
+  const calls = engineBeneath(on, {}, { toolDelay: 1000, completeDelay: 10, completeReply: NUMBERED_EXPLANATION })
   const pending = ask($, NUMBERED_QUESTIONS)
   await calls.clock.settle()
   await calls.clock.advance(10)
@@ -606,7 +872,7 @@ test('compact numbered guidance has cyan number chips, bold labels and green rec
     for (const row of aiRows) {
       expect(row.text).not.toContain('###')
       expect(row.text).not.toContain('**')
-      expect(row.props.wrap).toBe('truncate-end')
+      if (row.props.key !== 'deep') expect(row.props.wrap).toBe('truncate-end')
     }
     const rows = compactTextRows(await ui.drawn())
     for (const heading of ['▍あなたの最近の指示', '▍直前の Claude の説明']) {
@@ -626,8 +892,8 @@ test('compact numbered guidance has cyan number chips, bold labels and green rec
 test('compact spacers never displace numbered AI content when the row budget is short', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000,
-    forkDelay: 10,
-    forkReply: NUMBERED_EXPLANATION,
+    completeDelay: 10,
+    completeReply: NUMBERED_EXPLANATION,
     messages: [
       { role: 'user', text: `CURRENT_DEMO: ${'Build a local task board. '.repeat(10)}`, toolUses: [] },
       { role: 'assistant', text: LONG_LEAD, toolUses: [] },
@@ -662,8 +928,8 @@ test('compact spacers never displace numbered AI content when the row budget is 
 test('wrapped numbered option continuations align after the chip in a narrow compact pane', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000,
-    forkDelay: 10,
-    forkReply: { ...EXPLANATION, text: [
+    completeDelay: 10,
+    completeReply: { ...EXPLANATION, text: [
       '### Options',
       `1. SQLite: ${'a'.repeat(48)}`,
       '2) PostgreSQL：Uses production storage.',
@@ -690,7 +956,7 @@ test('wrapped numbered option continuations align after the chip in a narrow com
       expect(row.text.trim()).toContain('a')
       expect(row.text.length).toBeLessThanOrEqual(20)
       expect(row.props.bold ?? false).toBe(false)
-      expect(row.props.wrap).toBe('truncate-end')
+      if (row.props.key !== 'deep') expect(row.props.wrap).toBe('truncate-end')
     }
     const chips = await ui.findAll({ type: 'Text', text: /^\s*[12]\s*$/ })
     expect(chips.map(chip => chip.text.trim())).toEqual(['1', '2'])
@@ -699,7 +965,7 @@ test('wrapped numbered option continuations align after the chip in a narrow com
     const rows = compactTextRows(await ui.drawn())
     expect(rows.length).toBeLessThanOrEqual(props.scroll!.bodyRows)
     for (const row of rows) {
-      expect(row.props.wrap).toBe('truncate-end')
+      if (row.props.key !== 'deep') expect(row.props.wrap).toBe('truncate-end')
       expect(row.text).not.toContain('\n')
     }
     await ui.unmount()
@@ -711,8 +977,8 @@ test('wrapped numbered option continuations align after the chip in a narrow com
 test('an open question fits 20 background-only rows with AI, the newest instruction and lead tail on each surface', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000,
-    forkDelay: 10,
-    forkReply: LONG_EXPLANATION,
+    completeDelay: 10,
+    completeReply: LONG_EXPLANATION,
     messages: [
       { role: 'user', text: 'OLDER_REQUEST: build the initial demo.', toolUses: [] },
       { role: 'user', text: `REQUEST_START ${'Build a demo with many useful details. '.repeat(20)}`, toolUses: [] },
@@ -757,7 +1023,7 @@ test('an open question fits 20 background-only rows with AI, the newest instruct
     expect(rows.length).toBeLessThanOrEqual(20)
     expect(rows.length).toBe(20)
     for (const row of rows) {
-      expect(row.props.wrap).toBe('truncate-end')
+      if (row.props.key !== 'deep') expect(row.props.wrap).toBe('truncate-end')
       expect(row.text).not.toContain('\n')
     }
     expect((await ui.find({ type: 'Box' }))?.props.width).toBe(60)
@@ -782,8 +1048,8 @@ for (const explainState of ['off', 'pending', 'error'] as const) {
   test(`compact ${explainState} AI guidance gives unused rows to instruction and lead context`, { options: { language: 'ja' } }, async ($, on) => {
     const calls = engineBeneath(on, {}, {
       toolDelay: 1000,
-      forkDelay: explainState === 'pending' ? 2000 : 10,
-      forkReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelForkResult,
+      completeDelay: explainState === 'pending' ? 2000 : 10,
+      completeReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelCompleteResult,
       messages: [
         { role: 'user', text: `NEWEST_CONTEXT: ${'Build the demo carefully. '.repeat(20)}`, toolUses: [] },
         { role: 'assistant', text: LONG_LEAD, toolUses: [] },
@@ -815,7 +1081,10 @@ for (const explainState of ['off', 'pending', 'error'] as const) {
     }
     await calls.clock.advance(2000)
     await pending
-    if (explainState === 'off') expect(calls.fork).toBe(0)
+    if (explainState === 'off') {
+      expect(calls.fork).toBe(0)
+      expect(calls.complete).toBe(0)
+    }
   })
 }
 
@@ -831,8 +1100,8 @@ test('compact rows remain bounded with full-width text in a narrow pane', { opti
   }]
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000,
-    forkDelay: 10,
-    forkReply: { ...EXPLANATION, text: `理由は全角文字でも行数を制限するためです。${'背景と影響を確認して選択します。'.repeat(40)}` },
+    completeDelay: 10,
+    completeReply: { ...EXPLANATION, text: `理由は全角文字でも行数を制限するためです。${'背景と影響を確認して選択します。'.repeat(40)}` },
     messages: [
       { role: 'user', text: '全角文字の幅を考慮して実装してください。'.repeat(10), toolUses: [] },
       { role: 'assistant', text: `${'説明の先頭です。'.repeat(40)}\n終端の判断理由です。`, toolUses: [] },
@@ -847,11 +1116,11 @@ test('compact rows remain bounded with full-width text in a narrow pane', { opti
     const rows = compactTextRows(await ui.drawn())
     expect(rows.length).toBeLessThanOrEqual(20)
     for (const row of rows) {
-      expect(row.props.wrap).toBe('truncate-end')
+      if (row.props.key !== 'deep') expect(row.props.wrap).toBe('truncate-end')
       expect(row.text).not.toContain('\n')
     }
     expect((await ui.find({ type: 'Box' }))?.props.width).toBe(18)
-    expect(await ui.find({ type: 'Text', text: /^✦ AI解説: 理由は全$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^✦ AI解説… 要点のみ$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /全角Ａ案|全角Ｂ案|構成と移行方針/ })).toBeUndefined()
     expect(await ui.find({ text: /NARROW_PREVIEW/ })).toBeUndefined()
     await ui.unmount()
@@ -863,8 +1132,8 @@ test('compact rows remain bounded with full-width text in a narrow pane', { opti
 test('a taller compact pane clamps AI guidance to 65 percent and marks omitted lines', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000,
-    forkDelay: 10,
-    forkReply: LONG_EXPLANATION,
+    completeDelay: 10,
+    completeReply: LONG_EXPLANATION,
     messages: [
       { role: 'user', text: 'Build the current demo.', toolUses: [] },
       { role: 'assistant', text: LONG_LEAD, toolUses: [] },
@@ -899,7 +1168,7 @@ test('a taller compact pane clamps AI guidance to 65 percent and marks omitted l
 })
 
 test('zero, one and tiny pane row budgets drop content without overflowing', { options: { language: 'ja' } }, async ($, on) => {
-  const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 2000 })
+  const calls = engineBeneath(on, {}, { toolDelay: 1000, completeDelay: 2000 })
   const pending = ask($, COMPACT_QUESTIONS)
   await calls.clock.settle()
   for (const bodyRows of [0, 1, 2, 5]) {
@@ -909,7 +1178,7 @@ test('zero, one and tiny pane row budgets drop content without overflowing', { o
       const rows = compactTextRows(await ui.drawn())
       expect(rows.length).toBeLessThanOrEqual(bodyRows)
       for (const row of rows) {
-        expect(row.props.wrap).toBe('truncate-end')
+        if (row.props.key !== 'deep') expect(row.props.wrap).toBe('truncate-end')
         expect(row.text).not.toContain('\n')
       }
       expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
@@ -1015,7 +1284,7 @@ test('an answered question shows context, options and the chosen answer', { opti
   const calls = engineBeneath(on, { 'Which database should the demo app use?': 'PostgreSQL' })
   const ran = await ask($)
 
-  expect(calls.fork).toBe(1)
+  expect(calls.complete).toBe(1)
   expect(ran).toEqual({
     result: { questions: QUESTIONS, answers: { 'Which database should the demo app use?': 'PostgreSQL' } },
     ref: 7,
@@ -1050,7 +1319,7 @@ test('a dismissed question is marked cancelled', { options: { language: 'ja' } }
   }
 })
 
-test('turning the AI explanation off skips the fork', { options: { language: 'ja' } }, async ($, on) => {
+test('turning the AI explanation off skips the completion', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' })
   const ui = await mountPane($, 'terminal')
   expect((await ui.find({ key: 'ai' }))?.props.hotkey).toBe('a')
@@ -1060,13 +1329,14 @@ test('turning the AI explanation off skips the fork', { options: { language: 'ja
   await ask($)
 
   expect(calls.fork).toBe(0)
+  expect(calls.complete).toBe(0)
   const after = await mountPane($, 'terminal')
   expect(await after.find({ text: /AI解説: OFF/ })).toBeDefined()
   await after.press({ key: 'ai' })
   await after.unmount()
 
   await ask($, QUESTIONS, 'toolu_2')
-  expect(calls.fork).toBe(1)
+  expect(calls.complete).toBe(1)
   const enabled = await mountPane($, 'terminal')
   expect(await enabled.find({ text: /AI解説: ON/ })).toBeDefined()
   expect(await enabled.find({ text: /なぜ聞いているか/ })).toBeDefined()
@@ -1088,7 +1358,7 @@ async function fillNavigationHistory($: Engine, options: EngineOptions) {
     const name = ['oldest', 'middle', 'newest'][index]!
     await submit($, `${name.toUpperCase()}_INSTRUCTION: review this demo approach.`)
     options.messages = [{ role: 'assistant', text: `${name.toUpperCase()}_LEAD: here is the demo context.`, toolUses: [] }]
-    options.forkReply = { ...EXPLANATION, text: `${name.toUpperCase()}_AI: this is why we ask.` }
+    options.completeReply = { ...EXPLANATION, text: `${name.toUpperCase()}_AI: this is why we ask.` }
     await ask($, questions, `toolu_navigation_${index}`)
   }
 }
@@ -1181,6 +1451,7 @@ test('a historical open entry uses the full layout while the newest question is 
     userPrompts: [`RETAINED_INSTRUCTION_${index}: review the demo.`],
     lead: `RETAINED_LEAD_${index}: the decision background.`,
     questions,
+    explainMode: 'full',
     explainState: 'off',
     explanation: '',
     status: index === 1 ? 'open' : 'answered',
@@ -1218,9 +1489,9 @@ test('a new question resets history cursor and compact context always describes 
 
   await submit($, 'ARRIVING_INSTRUCTION: review the fresh demo decision.')
   options.messages = [{ role: 'assistant', text: 'ARRIVING_LEAD: the fresh decision is next.', toolUses: [] }]
-  options.forkReply = { ...EXPLANATION, text: 'ARRIVING_AI: the fresh decision needs background.' }
+  options.completeReply = { ...EXPLANATION, text: 'ARRIVING_AI: the fresh decision needs background.' }
   options.toolDelay = 1000
-  options.forkDelay = 10
+  options.completeDelay = 10
   const pending = ask($, [{ ...QUESTIONS[0]!, question: 'Which fresh demo decision should we make?' }], 'toolu_arriving')
   await calls.clock.settle()
   await calls.clock.advance(10)
@@ -1232,7 +1503,7 @@ test('a new question resets history cursor and compact context always describes 
     expect(await compact.find({ type: 'Text', text: /ARRIVING_LEAD/ })).toBeDefined()
     expect(await compact.find({ type: 'Text', text: /ARRIVING_AI/ })).toBeDefined()
     expect(await compact.find({ text: /OLDEST_INSTRUCTION|OLDEST_LEAD|OLDEST_AI|Which fresh demo decision/ })).toBeUndefined()
-    expect(await compact.findAll({ type: 'Button' })).toHaveLength(0)
+    expect((await compact.findAll({ type: 'Button' })).map(button => button.key)).toEqual(['deep'])
     await compact.unmount()
   }
   options.cursor = undefined
@@ -1355,14 +1626,14 @@ test('a freeform response remains visible in history', { options: { language: 'j
   }
 })
 
-test('the AI fork starts before the question and never holds up the answer', { options: { language: 'ja' } }, async ($, on) => {
+test('the AI completion starts before the question and never holds up the answer', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, {
-    forkDelay: 1000,
+    completeDelay: 1000,
     toolDelay: 100,
   })
   const pending = ask($)
   await calls.clock.settle()
-  expect(calls.order).toEqual(['fork', 'tool'])
+  expect(calls.order).toEqual(['complete', 'tool'])
 
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
@@ -1399,7 +1670,7 @@ test('an unplaced pane offers the /qa-guide command in a toast', { options: { la
   expect(calls.opened).toEqual([{ id: 'qa-guide', title: '質問ガイド' }])
   expect(calls.toast).toEqual(['質問ガイド: /qa-guide で背景と選択肢の詳細を表示できます'])
   expect(ran).toHaveProperty('result.answers', { 'Which database should the demo app use?': 'SQLite' })
-  expect(calls.fork).toBe(1)
+  expect(calls.complete).toBe(1)
   await calls.clock.settle()
 })
 
@@ -1472,10 +1743,10 @@ test('an engine tool error is relayed and marks the question cancelled', { optio
 
 test('an unavailable AI explanation leaves the original answer intact', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, {
-    forkReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelForkResult,
+    completeReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelCompleteResult,
   })
   const ran = await ask($)
-  expect(calls.fork).toBe(1)
+  expect(calls.complete).toBe(1)
   expect(ran).toHaveProperty('result.answers', { 'Which database should the demo app use?': 'SQLite' })
 
   await calls.clock.settle()
@@ -1634,7 +1905,7 @@ test('a subagent question reads the lead text from that agent\'s conversation', 
 
 const JAPANESE_QUESTIONS: Questions = [{ ...QUESTIONS[0]!, question: 'デモのデータベースをどれにしますか？' }]
 
-const ENGLISH_EXPLANATION: ModelForkResult = {
+const ENGLISH_EXPLANATION: ModelCompleteResult = {
   ...EXPLANATION,
   text: [
     '### Current instructions',
@@ -1678,8 +1949,8 @@ for (const language of ['en', 'ja'] as const) {
     await calls.clock.settle()
     expect(calls.savedEntries[0]).toHaveProperty('lang', language)
     expect(calls.languageLookups).toEqual([])
-    expect(calls.forkPrompts[0]).toContain(language === 'en' ? '### Current instructions' : '### いまの指示（概要）')
-    expect(calls.forkPrompts[0]).toContain(JSON.stringify(questions, null, 1))
+    expect(calls.completePrompts[0]).toContain(language === 'en' ? '### Current instructions' : '### いまの指示（概要）')
+    expect(calls.completePrompts[0]).toContain(JSON.stringify(questions, null, 1))
   })
 
   test(`the ${language} option bypasses unavailable fallback sources for an empty pane and command`, { options: { language } }, async ($, on) => {
@@ -1749,12 +2020,12 @@ test('an empty question list uses fallback and stores its language', { options: 
   expect(calls.languageLookups).toEqual(['config'])
 })
 
-test('English fork guidance preserves four ordered sections and dialog numbering for multiple questions', { options: { language: 'en' } }, async ($, on) => {
+test('English compact guidance preserves four ordered sections and dialog numbering for multiple questions', { options: { language: 'en' } }, async ($, on) => {
   const calls = engineBeneath(on, {})
   await submit($, 'Keep demo storage local.')
   await ask($, NUMBERED_QUESTIONS)
   await calls.clock.settle()
-  const prompt = calls.forkPrompts[0] ?? ''
+  const prompt = calls.completePrompts[0] ?? ''
   const headings = ['### Current instructions', '### Why Claude is asking', '### Effect of each option', '### Recommendation']
   for (const [i, heading] of headings.entries()) {
     expect(prompt).toContain(heading)
@@ -1779,7 +2050,7 @@ test('English fork guidance preserves four ordered sections and dialog numbering
 })
 
 test('English compact guidance renders translated badges, context and numbered AI sections on every surface', { options: { language: 'en' } }, async ($, on) => {
-  const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 10, forkReply: ENGLISH_EXPLANATION })
+  const calls = engineBeneath(on, {}, { toolDelay: 1000, completeDelay: 10, completeReply: ENGLISH_EXPLANATION })
   const pending = ask($, NUMBERED_QUESTIONS)
   await calls.clock.settle()
   await calls.clock.advance(10)
@@ -1801,7 +2072,7 @@ test('English compact guidance renders translated badges, context and numbered A
       expect((await ui.find({ type: 'Text', text: new RegExp(`^\\s*${label}:?\\s*$`) }))?.props.bold).toBe(true)
     }
     const rows = compactTextRows(await ui.find({ key: 'compact-ai' }))
-    expect(rows[0]?.text).toBe('✦ AI explanation: Current instructions')
+    expect(rows[0]?.text).toBe('✦ AI explanation: Current instructions compact context')
     for (const heading of ['Current instructions', 'Why Claude is asking', 'Effect of each option', 'Q1. Database', 'Q2. Drawing', 'Recommendation']) {
       const row = rows.find(row => row.text.includes(heading))
       expect(row?.props.bold).toBe(true)
@@ -1815,10 +2086,10 @@ test('English compact guidance renders translated badges, context and numbered A
     for (const row of rows) {
       expect(row.text).not.toContain('###')
       expect(row.text).not.toContain('**')
-      expect(row.props.wrap).toBe('truncate-end')
+      if (row.props.key !== 'deep') expect(row.props.wrap).toBe('truncate-end')
     }
     expect(compactTextRows(await ui.drawn()).length).toBeLessThanOrEqual(PANE_PROPS.scroll!.bodyRows)
-    expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
+    expect((await ui.findAll({ type: 'Button' })).map(button => button.key)).toEqual(['deep'])
     expect(await ui.findAll({ type: 'Markdown' })).toHaveLength(0)
     expect(await ui.find({ text: /回答待ち|質問の背景|あなたの最近の指示|直前の Claude の説明|AI解説/ })).toBeUndefined()
     await ui.unmount()
@@ -1829,7 +2100,7 @@ test('English compact guidance renders translated badges, context and numbered A
 })
 
 test('English full guidance renders translated sections, answer badges and history toolbars on every surface', { options: { language: 'en' } }, async ($, on) => {
-  const calls = engineBeneath(on, { 'Which database should the demo app use?': 'PostgreSQL', 'How should the demo draw its board?': 'Canvas' }, { forkReply: ENGLISH_EXPLANATION })
+  const calls = engineBeneath(on, { 'Which database should the demo app use?': 'PostgreSQL', 'How should the demo draw its board?': 'Canvas' }, { completeReply: ENGLISH_EXPLANATION })
   await ask($, NUMBERED_QUESTIONS)
   await ask($, NUMBERED_QUESTIONS, 'toolu_english_second')
   await calls.clock.settle()
@@ -1867,7 +2138,7 @@ test('English full guidance renders translated sections, answer badges and histo
 })
 
 test('English cancellation and unavailable AI explanation keep translated status and errors', { options: { language: 'en' } }, async ($, on) => {
-  const calls = engineBeneath(on, 'deny', { forkReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelForkResult })
+  const calls = engineBeneath(on, 'deny', { completeReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelCompleteResult })
   await ask($)
   await calls.clock.settle()
   for (const surface of SURFACES) {
@@ -1911,10 +2182,10 @@ test('legacy entries without lang retain Japanese UI even under an English overr
 })
 
 test('bilingual history retains each entry language after explanation updates and fallback settings change', { options: { language: 'auto' } }, async ($, on) => {
-  const options: EngineOptions = { forkReply: { ...EXPLANATION, text: 'Japanese guidance.' }, forkDelay: 10 }
+  const options: EngineOptions = { completeReply: { ...EXPLANATION, text: 'Japanese guidance.' }, completeDelay: 10 }
   const calls = engineBeneath(on, 'deny', options)
   await ask($, JAPANESE_QUESTIONS, 'toolu_bilingual_ja')
-  options.forkReply = ENGLISH_EXPLANATION
+  options.completeReply = ENGLISH_EXPLANATION
   await ask($, QUESTIONS, 'toolu_bilingual_en')
   await calls.clock.advance(10)
   expect(calls.savedEntries[0]).toHaveProperty('lang', 'ja')
@@ -1947,7 +2218,7 @@ test('bilingual history retains each entry language after explanation updates an
   expect(calls.languageLookups).toEqual([])
 })
 
-const SHORT_ENGLISH_EXPLANATION: ModelForkResult = {
+const SHORT_ENGLISH_EXPLANATION: ModelCompleteResult = {
   ...EXPLANATION,
   text: [
     '### Current instructions', 'Build a small demo board.',
@@ -1960,8 +2231,8 @@ const SHORT_ENGLISH_EXPLANATION: ModelForkResult = {
 for (const state of ['off', 'error'] as const) {
   test(`English ${state} guidance translates both compact and full state messages`, async ($, on) => {
     const calls = engineBeneath(on, {}, {
-      toolDelay: 1000, forkDelay: 10,
-      forkReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelForkResult,
+      toolDelay: 1000, completeDelay: 10,
+      completeReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelCompleteResult,
     })
     if (state === 'off') {
       const ui = await mountPane($, 'terminal')
@@ -1991,7 +2262,7 @@ for (const state of ['off', 'error'] as const) {
       expect((await ui.find({ key: 'ai' }))?.props.label).toBe(state === 'off' ? 'AI explanation: OFF' : 'AI explanation: ON')
       await ui.unmount()
     }
-    expect(calls.fork).toBe(state === 'off' ? 0 : 1)
+    expect(calls.complete).toBe(state === 'off' ? 0 : 1)
   })
 }
 
@@ -2017,7 +2288,7 @@ for (const [name, questions, lang] of [
     expect(calls.savedEntries[0]?.lang).toBe(lang)
     expect(calls.opened).toEqual([{ id: 'qa-guide', title: lang === 'en' ? 'Question guide' : '質問ガイド' }])
     expect(calls.languageLookups).toEqual([])
-    expect(calls.forkPrompts[0]).toContain(lang === 'en' ? '### Current instructions' : '### いまの指示（概要）')
+    expect(calls.completePrompts[0]).toContain(lang === 'en' ? '### Current instructions' : '### いまの指示（概要）')
   })
 }
 
@@ -2029,7 +2300,7 @@ test('the English user configuration overrides Japanese questions and all fallba
   await ask($, JAPANESE_QUESTIONS)
   await calls.clock.settle()
   expect(calls.savedEntries[0]?.lang).toBe('en')
-  expect(calls.forkPrompts[0]).toContain('### Current instructions')
+  expect(calls.completePrompts[0]).toContain('### Current instructions')
   expect(calls.languageLookups).toEqual([])
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
@@ -2047,7 +2318,7 @@ test('the Japanese user configuration overrides English questions and all fallba
   await ask($)
   await calls.clock.settle()
   expect(calls.savedEntries[0]?.lang).toBe('ja')
-  expect(calls.forkPrompts[0]).toContain('### いまの指示（概要）')
+  expect(calls.completePrompts[0]).toContain('### いまの指示（概要）')
   expect(calls.languageLookups).toEqual([])
 })
 
@@ -2147,7 +2418,7 @@ test('mixed-language entries retain their original language while browsing on bo
 })
 
 test('English compact panes show translated badges, context titles, hints and AI headings on both surfaces', async ($, on) => {
-  const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 10, forkReply: SHORT_ENGLISH_EXPLANATION })
+  const calls = engineBeneath(on, {}, { toolDelay: 1000, completeDelay: 10, completeReply: SHORT_ENGLISH_EXPLANATION })
   const pending = ask($)
   await calls.clock.settle()
   for (const surface of SURFACES) {
@@ -2177,7 +2448,7 @@ test('English compact panes show translated badges, context titles, hints and AI
 })
 
 test('English pending guidance retains its complete text when wrapping in narrow compact panes', { options: { language: 'en' } }, async ($, on) => {
-  const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 2000 })
+  const calls = engineBeneath(on, {}, { toolDelay: 1000, completeDelay: 2000 })
   const pending = ask($)
   await calls.clock.settle()
   for (const bodyColumns of [40, 60]) {
@@ -2188,7 +2459,7 @@ test('English pending guidance retains its complete text when wrapping in narrow
       if (bodyColumns === 40) expect(aiRows).toHaveLength(2)
       for (const row of aiRows) expect([...row.text].length).toBeLessThanOrEqual(bodyColumns)
       for (const row of compactTextRows(await ui.drawn())) {
-        expect(row.props.wrap).toBe('truncate-end')
+        if (row.props.key !== 'deep') expect(row.props.wrap).toBe('truncate-end')
         expect(row.text).not.toContain('\n')
       }
       expect(compactTextRows(await ui.drawn()).length).toBeLessThanOrEqual(20)
@@ -2202,7 +2473,7 @@ test('English pending guidance retains its complete text when wrapping in narrow
 })
 
 test('English full panes translate section titles, all toolbar labels and history on both surfaces', async ($, on) => {
-  const calls = engineBeneath(on, {}, { forkReply: SHORT_ENGLISH_EXPLANATION })
+  const calls = engineBeneath(on, {}, { completeReply: SHORT_ENGLISH_EXPLANATION })
   for (let i = 0; i < 3; i++) await ask($, QUESTIONS, `toolu_english_full_${i}`)
   await calls.clock.settle()
   for (const surface of SURFACES) {
@@ -2283,13 +2554,13 @@ test('an unplaced English pane uses an English toast and title without altering 
   expect(ran).toHaveProperty('result.answers', answers)
 })
 
-test('the English fork prompt retains four sections, quoted context and exact dialog numbering rules', async ($, on) => {
+test('the English compact prompt retains four sections, quoted context and exact dialog numbering rules', async ($, on) => {
   const calls = engineBeneath(on, {})
   await submit($, 'Build a small demo board.')
   await submit($, 'Keep setup simple and explain the choices.')
   await ask($, NUMBERED_QUESTIONS)
   await calls.clock.settle()
-  const prompt = calls.forkPrompts[0] ?? ''
+  const prompt = calls.completePrompts[0] ?? ''
   const headings = ['### Current instructions', '### Why Claude is asking', '### Effect of each option', '### Recommendation']
   for (const [i, heading] of headings.entries()) {
     expect(prompt).toContain(heading)
@@ -2315,19 +2586,17 @@ test('the English fork prompt retains four sections, quoted context and exact di
   expect(prompt).not.toContain('### おすすめ')
 })
 
-test('a question asked before the first response falls back to a stand-alone completion', async ($, on) => {
-  const prompts: { model: string; prompt: string }[] = []
-  engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, {
-    forkReply: { isAnswered: false, reason: 'nothing-to-fork' } as ModelForkResult,
-  })
-  on('model.complete', async (_$, e) => {
-    prompts.push({ model: e.model, prompt: e.prompt })
-    return { value: EXPLANATION as never }
+test('a question asked before the first response falls back to a stand-alone completion', { options: { context: 'full' } }, async ($, on) => {
+  const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, {
+    forkReply: { isAnswered: false, reason: 'nothing-to-fork' },
   })
   await ask($)
-
+  await calls.clock.settle()
+  const prompts = calls.completeRequests
+  expect(calls.fork).toBe(1)
   expect(prompts.length).toBe(1)
   expect(prompts[0]!.model).toBe('haiku')
+  expect(prompts[0]!.maxTokens).toBe(1500)
   expect(prompts[0]!.prompt).toContain('Which database should the demo app use?')
   expect(prompts[0]!.prompt).toContain('Next I need a database.')
   for (const surface of SURFACES) {
@@ -2338,23 +2607,19 @@ test('a question asked before the first response falls back to a stand-alone com
   }
 })
 
-test('other fork failures are shown without a fallback call', async ($, on) => {
-  let completes = 0
-  engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, {
-    forkReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelForkResult,
-  })
-  on('model.complete', async () => {
-    completes += 1
-    return { value: EXPLANATION as never }
+test('other fork failures are shown without a fallback call', { options: { context: 'full' } }, async ($, on) => {
+  const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, {
+    forkReply: { isAnswered: false, reason: 'empty-reply', usage: EXPLANATION.usage },
   })
   await ask($)
-
-  expect(completes).toBe(0)
+  await calls.clock.settle()
+  expect(calls.fork).toBe(1)
+  expect(calls.complete).toBe(0)
 })
 
 test('English explanation lines wrap at spaces, not inside words', async ($, on) => {
   const sentence = 'We need to choose a storage backend that fits the scope and complexity of the app before building persistence.'
-  const calls = engineBeneath(on, {}, { toolDelay: 1000, forkReply: { ...EXPLANATION, text: `### Why Claude is asking\n${sentence}` } })
+  const calls = engineBeneath(on, {}, { toolDelay: 1000, completeReply: { ...EXPLANATION, text: `### Why Claude is asking\n${sentence}` } })
   const asked = $.tool.call({ tool: 'AskUserQuestion', tool_use_id: 'toolu_wrap', questions: [{ question: 'Where should data live?', header: 'Storage', multiSelect: false, options: [{ label: 'JSON file', description: '' }, { label: 'SQLite', description: '' }] }] })
   await calls.clock.settle()
 

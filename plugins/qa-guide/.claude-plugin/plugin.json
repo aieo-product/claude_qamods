@@ -1,6 +1,6 @@
 {
   "name": "qa-guide",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shows Claude's AskUserQuestion prompts in a side pane with context, option details, an AI explanation and answer history.",
   "author": {
     "name": "aieo-product"
@@ -26,6 +26,16 @@
         "ja"
       ],
       "default": "auto"
+    },
+    "context": {
+      "type": "string",
+      "title": "Context",
+      "description": "Context for AI explanations (compact uses Haiku; full uses the whole session).",
+      "options": [
+        "compact",
+        "full"
+      ],
+      "default": "compact"
     }
   }
 }

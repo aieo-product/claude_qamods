@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, SessionMessage } from 'claude-code'
 
 import type { QaEntry, QaQuestion } from '../types'
 
@@ -40,6 +40,11 @@ const STRINGS = {
     freeformAnswer: 'Freeform answer',
     aiTitle: '✦ AI explanation (instructions, context, effects, recommendation)',
     aiPrefix: '✦ AI explanation: ',
+    deep: 'Full context',
+    compactContext: 'compact context',
+    fullContext: 'full context',
+    leadData: "Claude's text before the question:",
+    toolData: 'Tool activity since the latest user instruction:',
     pastQuestions: 'Past questions and answers',
     selected: '▶ Selected',
     open: 'Open',
@@ -112,6 +117,11 @@ const STRINGS = {
     freeformAnswer: '自由記述の回答',
     aiTitle: '✦ AI解説（指示・背景・影響・おすすめ）',
     aiPrefix: '✦ AI解説: ',
+    deep: '全文脈で解説',
+    compactContext: '要点のみ',
+    fullContext: '全文脈',
+    leadData: '質問の直前の Claude の説明:',
+    toolData: '最後の本人の指示以降のツール操作:',
     pastQuestions: '過去の質問と回答',
     selected: '▶ 選択中',
     open: '開く',
@@ -395,6 +405,63 @@ const explainPrompt = (questions: QaQuestion[], userPrompts: string[], lang: Lan
     JSON.stringify(questions, null, 1),
   ].join('\n')
 
+const COMPACT_CONTEXT_CAP = 12_000
+const bounded = (text: string, max: number) => text.length <= max
+  ? text
+  : max > 0 ? `${text.slice(0, max - 1)}…` : ''
+
+const isRealUserMessage = (message: SessionMessage) =>
+  message.role === 'user' && message.text.trim() && !message.toolResults?.length &&
+  !message.text.trim().startsWith('<')
+
+/** The complete compact request; transcript bodies and tool results stay out. */
+export function buildCompactContext(
+  messages: readonly SessionMessage[],
+  userPrompts: readonly string[],
+  lead: string,
+  questions: QaQuestion[] = [],
+  lang: Lang = 'en',
+): string {
+  let start = 0
+  for (let i = 0; i < messages.length; i++) {
+    if (isRealUserMessage(messages[i]!)) start = i + 1
+  }
+  const toolSummary = messages.slice(start)
+    .flatMap(message => message.toolUses ?? [])
+    .slice(-12)
+    .map(use => {
+      const input = Object.values(use.input).find(value => typeof value === 'string')
+      return bounded(oneLine(`${use.tool}: ${typeof input === 'string' ? input : ''}`), 120)
+    })
+    .join('\n')
+
+  const headings = [
+    t(lang, 'explainInstructions'), t(lang, 'promptData'), t(lang, 'quoteHint'),
+    '', t(lang, 'leadData'), '', t(lang, 'toolData'), '', t(lang, 'questionData'),
+  ]
+  const fixedLength = headings.join('\n').length + 4
+  const leadData = lead.slice(-2500)
+  const questionJson = JSON.stringify(questions, null, 1)
+  // JSON escapes can expand even a clipped instruction. Leave room for
+  // questions while retaining the bounded lead and every tool summary.
+  const promptBudget = Math.max(0, COMPACT_CONTEXT_CAP - fixedLength - leadData.length -
+    toolSummary.length - Math.min(2000, questionJson.length))
+  const promptData = bounded(
+    JSON.stringify(userPrompts.slice(-3).map(prompt => prompt.slice(0, 600)), null, 1),
+    Math.min(6000, promptBudget),
+  )
+  // Preserve the complete question block whenever it fits; unusually large
+  // option previews cannot expand the request beyond the overall cap.
+  const questionData = bounded(questionJson,
+    Math.max(0, COMPACT_CONTEXT_CAP - fixedLength - promptData.length - leadData.length - toolSummary.length))
+  return [
+    headings[0], headings[1], headings[2], promptData,
+    headings[3], headings[4], leadData,
+    headings[5], headings[6], toolSummary,
+    headings[7], headings[8], questionData,
+  ].join('\n')
+}
+
 export async function openQuestionPane(ui: Pick<EngineInterface['ui'], 'open' | 'scroll'>, lang: Lang = 'ja') {
   const opened = await ui.open({ id: PANE, title: t(lang, 'title') })
   try {
@@ -405,7 +472,58 @@ export async function openQuestionPane(ui: Pick<EngineInterface['ui'], 'open' | 
   return opened
 }
 
+async function explain(
+  $: EngineInterface,
+  entryId: string,
+  mode: QaEntry['explainMode'],
+  compactContexts: Map<string, string>,
+  runIds: Map<string, number>,
+) {
+  const runId = (runIds.get(entryId) ?? 0) + 1
+  runIds.set(entryId, runId)
+  const entry = (await read($, entries)).find(x => x.id === entryId)
+  if (!entry || runIds.get(entryId) !== runId) return
+  await update($, entries, list => runIds.get(entryId) !== runId ? list : list.map(x =>
+    x.id === entryId ? { ...x, explainMode: mode, explainState: 'pending' as const, explanation: '' } : x,
+  ))
+  if (runIds.get(entryId) !== runId) return
+
+  const prompt = mode === 'compact'
+    ? compactContexts.get(entryId) ?? buildCompactContext([], entry.userPrompts ?? [], entry.lead, entry.questions, entry.lang ?? 'ja')
+    : explainPrompt(entry.questions, entry.userPrompts ?? [], entry.lang ?? 'ja')
+  const request = mode === 'compact'
+    ? $.model.complete({
+        model: 'haiku',
+        prompt,
+        maxTokens: 1500,
+      })
+    : $.model.fork({ prompt }).then(reply => {
+        // Before the first response there is no transcript to fork.
+        if (reply.isAnswered || reply.reason !== 'nothing-to-fork') return reply
+        if (runIds.get(entryId) !== runId) return reply
+        const context = entry.lead.trim() ? `\n\n${t(entry.lang ?? 'ja', 'leadData')}\n${JSON.stringify(entry.lead)}` : ''
+        return $.model.complete({ model: 'haiku', prompt: prompt + context, maxTokens: 1500 })
+      })
+  void request.then(
+    reply => update($, entries, list => runIds.get(entryId) !== runId ? list : list.map(x =>
+      x.id === entryId
+        ? reply.isAnswered
+          ? { ...x, explainState: 'done' as const, explanation: clip(reply.text, 6000) }
+          : { ...x, explainState: 'error' as const, explanation: String(reply.reason) }
+        : x,
+    )),
+    () => update($, entries, list => runIds.get(entryId) !== runId ? list : list.map(x =>
+      x.id === entryId ? { ...x, explainState: 'error' as const } : x,
+    )),
+  ).catch(() => {
+    // The session (or this module) may have ended while the explanation ran.
+  })
+}
+
 export const register: Register = (on, options) => {
+  const compactContexts = new Map<string, string>()
+  const runIds = new Map<string, number>()
+
   on('prompt.submit', async ($, e, next) => {
     try {
       if ((e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk') &&
@@ -445,16 +563,16 @@ export const register: Register = (on, options) => {
     // 本人の最近の指示と、最後の指示の後の Claude の説明文を拾う。
     const userPrompts = (await read($, prompts)).slice(-3)
     let lead = ''
+    let messages: SessionMessage[] = []
     try {
       // サブエージェントの質問なら、そのエージェントの会話から拾う。
       const read = e.agentId ? await $.session.messages({ agentId: e.agentId }) : await $.session.messages()
-      const messages = Array.isArray(read) ? read : []
+      messages = Array.isArray(read) ? read : []
       let start = 0
       const fallback: string[] = []
       for (let i = 0; i < messages.length; i++) {
         const m = messages[i]
-        if (m && m.role === 'user' && m.text.trim() && !(m.toolResults?.length) &&
-          !m.text.trim().startsWith('<')) {
+        if (m && isRealUserMessage(m)) {
           fallback.push(m.text.trim().slice(0, 600))
           start = i + 1
         }
@@ -470,6 +588,7 @@ export const register: Register = (on, options) => {
     }
 
     const aiOn = await read($, isAiOn)
+    const mode = options.context === 'full' ? 'full' : 'compact'
     const entry: QaEntry = {
       id,
       lang,
@@ -477,11 +596,17 @@ export const register: Register = (on, options) => {
       userPrompts,
       lead: tail(lead, 2500),
       questions,
+      explainMode: mode,
       explainState: aiOn ? 'pending' : 'off',
       explanation: '',
       status: 'open',
       answers: {},
     }
+    compactContexts.delete(id)
+    compactContexts.set(id, buildCompactContext(messages, userPrompts, lead, questions, lang))
+    if (compactContexts.size > 20) compactContexts.delete(compactContexts.keys().next().value!)
+    // Reusing an entry id must also invalidate an older in-flight explanation.
+    runIds.set(id, (runIds.get(id) ?? 0) + 1)
     await update($, entries, list => [...list.filter(x => x.id !== id), entry].slice(-20))
     await update($, cursor, () => 0)
 
@@ -494,31 +619,7 @@ export const register: Register = (on, options) => {
     }
 
     if (aiOn) {
-      const prompt = explainPrompt(questions, userPrompts, lang)
-      void $.model.fork({ prompt }).then(async reply => {
-        // A question asked before the session's first response has no transcript
-        // to fork. Explain it from the instructions and Claude's lead text instead.
-        if (reply.isAnswered || reply.reason !== 'nothing-to-fork') return reply
-        const context = lead.trim() ? `\n\n${lang === 'ja' ? '質問の直前の Claude の説明' : "Claude's text before the question"}:\n${JSON.stringify(tail(lead, 2500))}` : ''
-        return $.model.complete({ model: 'haiku', prompt: prompt + context, maxTokens: 1500 })
-      }).then(
-        reply =>
-          update($, entries, list =>
-            list.map(x =>
-              x.id === id
-                ? reply.isAnswered
-                  ? { ...x, explainState: 'done' as const, explanation: clip(reply.text, 6000) }
-                  : { ...x, explainState: 'error' as const, explanation: String(reply.reason) }
-                : x,
-            ),
-          ),
-        () =>
-          update($, entries, list =>
-            list.map(x => (x.id === id ? { ...x, explainState: 'error' as const } : x)),
-          ),
-      ).catch(() => {
-        // The session (or this module) may have ended while the explanation ran.
-      })
+      await explain($, id, mode, compactContexts, runIds)
     }
 
     let ran: Awaited<ReturnType<typeof next>>
@@ -557,6 +658,7 @@ export const register: Register = (on, options) => {
     const list = (await read($, entries)).map(x => ({
       ...x,
       lang: x.lang ?? 'ja',
+      explainMode: x.explainMode ?? 'full',
       userPrompts: Array.isArray(x.userPrompts) ? x.userPrompts : [],
     }))
     const aiOn = await read($, isAiOn)
@@ -648,6 +750,8 @@ export const register: Register = (on, options) => {
       ) : (
         <Text backgroundColor="gray" color="black" bold>{t(lang, 'cancelled')}</Text>
       )
+    const modeTag = t(lang, current.explainMode === 'compact' ? 'compactContext' : 'fullContext')
+    const deepButton = <Button key="deep" hotkey="f" plain label={t(lang, 'deep')} onPress={() => explain($, current.id, 'full', compactContexts, runIds)} />
 
     if (newest?.status === 'open') {
       const columns = Math.max(1, Math.floor(e.props.bodyColumns))
@@ -685,6 +789,17 @@ export const register: Register = (on, options) => {
       const requestSpacer = requestLines.length > 0 && remaining > 0
       if (requestSpacer) remaining -= 1
       const leadSpacer = leadLines.length > 0 && remaining > 0
+      if (leadSpacer) remaining -= 1
+      const showDeep = current.explainState === 'done' && remaining > 0
+      const showModeTag = !!aiLines[0] &&
+        (current.explainState === 'done' ||
+          [...`${aiLines[0].text} ${modeTag}`].reduce((cells, char) => cells + cellWidth(char), 0) <= columns)
+      const inlineModeTag = truncateCells(modeTag, columns)
+      const tagCells = [...inlineModeTag].reduce((cells, char) => cells + cellWidth(char), 0)
+      const firstAiColumns = Math.max(0, columns - tagCells - 1)
+      const displayedAiLines = aiLines.map((line, i) => i === 0 && showModeTag
+        ? { ...line, text: firstAiColumns > 0 ? truncateCells(line.text, firstAiColumns) : '' }
+        : line)
 
       return (
         <Box flexDirection="column" width={columns}>
@@ -697,14 +812,17 @@ export const register: Register = (on, options) => {
           )}
           {aiLines.length > 0 && (
             <Box key="compact-ai" flexDirection="column">
-              {aiLines.map((line, i) => (
+              {displayedAiLines.map((line, i) => (
                 <Text
                   key={`ai${i}`}
                   color={line.recommendation ? 'green' : line.heading || (i === 0 && !line.option) ? 'magenta' : undefined}
                   bold={line.recommendation || line.heading || (i === 0 && !line.option)}
                   wrap="truncate-end"
                 >
-                  {line.option ? line.text.slice(0, line.option.numberStart) : line.text}
+                  {line.option ? line.text.slice(0, line.option.numberStart) :
+                    i === 0 && showModeTag
+                      ? <Text color={line.recommendation ? 'green' : 'magenta'} bold>{line.text}</Text>
+                      : line.text}
                   {line.option && line.option.numberEnd > line.option.numberStart && (
                     <Text color="cyan" bold>{line.text.slice(line.option.numberStart, line.option.numberEnd)}</Text>
                   )}
@@ -712,10 +830,13 @@ export const register: Register = (on, options) => {
                     <Text bold>{line.text.slice(line.option.numberEnd, line.option.labelEnd)}</Text>
                   )}
                   {line.option && line.text.slice(line.option.labelEnd)}
+                  {i === 0 && showModeTag && line.text && ' '}
+                  {i === 0 && showModeTag && <Text dimColor bold={false}>{inlineModeTag}</Text>}
                 </Text>
               ))}
             </Box>
           )}
+          {showDeep && deepButton}
           {requestLines.length > 0 && (
             <Box key="compact-instructions" flexDirection="column">
               {requestSpacer && <Text wrap="truncate-end">{t(lang, 'blank')}</Text>}
@@ -800,12 +921,16 @@ export const register: Register = (on, options) => {
         )}
 
         <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="magenta" paddingX={1}>
-          <Text color="magenta" bold>{t(lang, 'aiTitle')}</Text>
+          <Box flexDirection="row" gap={1}>
+            <Text color="magenta" bold>{t(lang, 'aiTitle')}</Text>
+            <Text dimColor>{modeTag}</Text>
+          </Box>
           {current.explainState === 'pending' && <Text dimColor>{t(lang, 'generating')}</Text>}
           {current.explainState === 'done' && <Markdown text={current.explanation} />}
           {current.explainState === 'error' && <Text color="red">{t(lang, 'explainError', { explanation: current.explanation })}</Text>}
           {current.explainState === 'off' && <Text dimColor>{t(lang, 'fullOff')}</Text>}
         </Box>
+        {deepButton}
 
         {history && list.length > 1 && (
           <Box flexDirection="column" marginTop={1}>
