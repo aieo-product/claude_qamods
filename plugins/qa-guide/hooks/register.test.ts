@@ -3,6 +3,7 @@ import type { Engine, MockClock } from 'claude-code/testing'
 import type { ConfigRow, ModelCompleteRequest, ModelCompleteResult, ModelForkResult, ModelUsage, On, PaneOpenArgs, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionMessage, ToolCallResult, UiScrollArgs } from 'claude-code'
 
 import { buildCompactContext, openQuestionPane } from './register'
+import { estimateCost, formatCost, resolvePrice } from './pricing'
 import type { QaEntry } from '../types'
 
 const SURFACES = ['terminal', 'desktop'] as const
@@ -90,6 +91,8 @@ type Calls = {
   savedPrompts: string[]
   savedEntries: QaEntry[]
   savedUsageTotal?: number
+  savedCostTotal?: { usd: number; hasPricedUsage: boolean; hasUnpricedUsage: boolean; tokens: number }
+  sessionModelLookups: number
   savedCursor?: number
   toast: string[]
   opened: PaneOpenArgs[]
@@ -120,6 +123,8 @@ type EngineOptions = {
   configThrows?: boolean
   env?: Record<string, string | undefined>
   envThrows?: string[]
+  sessionModel?: string
+  modelThrows?: boolean
 }
 
 const EXPLANATION = {
@@ -181,6 +186,7 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
     registered: [],
     registeredDescriptions: [],
     languageLookups: [],
+    sessionModelLookups: 0,
     order: [],
     clock: mock.clock(on, { now: 1000 }),
   }
@@ -192,6 +198,7 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
       if (e.key === 'prompts') calls.savedPrompts = e.value
       if (e.key === 'entries') calls.savedEntries = e.value
       if (e.key === 'usageTotal') calls.savedUsageTotal = e.value
+      if (e.key === 'costTotal') calls.savedCostTotal = e.value
       if (e.key === 'cursor') calls.savedCursor = e.value
     }
     return ran
@@ -215,6 +222,11 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
     { role: 'user', text: 'Build a demo todo app', toolUses: [] },
     { role: 'assistant', text: 'I scaffolded the app. Next I need a database.', toolUses: [] },
   ] }))
+  on('session.model', () => {
+    calls.sessionModelLookups += 1
+    if (options.modelThrows) throw new Error('Demo session model is unavailable.')
+    return { value: options.sessionModel ?? 'demo-unpriced-model' }
+  })
   on('ui.open', (_$, e) => {
     calls.opened.push(e)
     return { value: options.isPlaced === false
@@ -625,7 +637,7 @@ for (const lang of ['en', 'ja'] as const) {
 
 for (const lang of ['en', 'ja'] as const) {
   for (const context of ['compact', 'full'] as const) {
-    test(`${lang} ${context} measured usage renders on both surfaces in compact and full panes`, { options: { language: lang, context } }, async ($, on) => {
+    test(`${lang} ${context} measured usage renders on both surfaces in compact and full panes`, { options: { language: lang, context, showCost: 'off' } }, async ($, on) => {
       const reply = { ...EXPLANATION, text: 'Demo guidance.', usage: MEASURED_USAGE }
       const calls = engineBeneath(on, {}, { toolDelay: 1000, messages: [], completeReply: reply, forkReply: reply })
       const asked = ask($)
@@ -656,7 +668,7 @@ for (const lang of ['en', 'ja'] as const) {
     })
   }
 
-  test(`${lang} reruns replace entry usage while every request adds all four counts to the session`, { options: { language: lang } }, async ($, on) => {
+  test(`${lang} reruns replace entry usage while every request adds all four counts to the session`, { options: { language: lang, showCost: 'off' } }, async ($, on) => {
     const calls = engineBeneath(on, {}, {
       completeReply: { ...EXPLANATION, usage: MEASURED_USAGE },
       forkReply: { ...EXPLANATION, usage: SESSION_USAGE },
@@ -740,7 +752,7 @@ for (const lang of ['en', 'ja'] as const) {
 
 for (const context of ['compact', 'full'] as const) {
   for (const reason of ['api-error', 'aborted', 'empty-reply'] as const) {
-    test(`${context} ${reason} results retain measured usage even without an explanation`, { options: { language: 'en', context } }, async ($, on) => {
+    test(`${context} ${reason} results retain measured usage even without an explanation`, { options: { language: 'en', context, showCost: 'off' } }, async ($, on) => {
       const usage = context === 'full' ? SESSION_USAGE : reason === 'empty-reply' ? MEASURED_USAGE : ZERO_USAGE
       const reply: ModelCompleteResult = reason === 'api-error'
         ? { isAnswered: false, reason, status: 429, error: 'rate_limit', usage }
@@ -768,6 +780,7 @@ test('a completion rejection has no measured usage or session spend', async ($, 
   await calls.clock.settle()
   expect(calls.savedEntries[0]).toHaveProperty('explainState', 'error')
   expect(calls.savedEntries[0]).not.toHaveProperty('usage')
+  expect(calls.savedEntries[0]).not.toHaveProperty('costUsd')
   expect(calls.savedUsageTotal ?? 0).toBe(0)
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
@@ -815,7 +828,7 @@ test('concurrent question completions each add measured usage to the session tot
 })
 
 for (const carriesUsage of [false, true]) {
-  test(`nothing-to-fork fallback records Haiku usage${carriesUsage ? ' and any carried fork usage' : ''}`, { options: { context: 'full' } }, async ($, on) => {
+  test(`nothing-to-fork fallback records Haiku usage${carriesUsage ? ' and any carried fork usage' : ''}`, { options: { context: 'full', showCost: 'off' } }, async ($, on) => {
     const forkReply: ModelForkResult = carriesUsage
       ? { isAnswered: false, reason: 'nothing-to-fork', usage: SESSION_USAGE } as ModelForkResult
       : { isAnswered: false, reason: 'nothing-to-fork' }
@@ -864,7 +877,7 @@ for (const surface of SURFACES) {
   })
 }
 
-test('measured compact usage never steals content or the Full context button from the row budget', async ($, on) => {
+test('measured compact usage never steals content or the Full context button from the row budget', { options: { showCost: 'off' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000, messages: [], completeReply: { ...EXPLANATION, text: 'Demo guidance.', usage: MEASURED_USAGE },
   })
@@ -892,6 +905,318 @@ test('measured compact usage never steals content or the Full context button fro
   await calls.clock.advance(1000)
   await asked
 })
+
+const COST_SUFFIX = {
+  en: (amount: string) => ` · ≈ ${amount} (API price)`,
+  ja: (amount: string) => ` ・ ≈ ${amount}（API料金換算）`,
+}
+
+const sessionTokenLine = (lang: 'en' | 'ja', total: string) =>
+  lang === 'en' ? `AI tokens this session: ${total}` : `このセッションのAIトークン: ${total}`
+
+const expectCost = (actual: number | undefined, expected: number) => {
+  expect(actual).toBeDefined()
+  expect(Number(actual?.toFixed(8))).toBe(expected)
+}
+
+test('API prices resolve the Haiku alias and every supported model prefix with September 2026 rates', () => {
+  expect(resolvePrice('haiku')).toEqual({ modelId: 'claude-haiku-4-5', input: 1, output: 5, cacheRead: 0.10 })
+  const rates = [
+    ['claude-haiku-4-5', 1, 5, 0.10],
+    ['claude-sonnet-5-5', 2, 10, 0.20],
+    ['claude-sonnet-5', 2, 10, 0.20],
+    ['claude-opus-5-5', 4, 20, 0.20],
+    ['claude-opus-5', 5, 25, 0.50],
+    ['claude-opus-4-8', 5, 25, 0.50],
+    ['claude-opus-4-7', 5, 25, 0.50],
+    ['claude-opus-4-6', 5, 25, 0.50],
+  ] as const
+  for (const [modelId, input, output, cacheRead] of rates) {
+    for (const suffix of ['', '[1m]', '-demo-suffix']) {
+      expect(resolvePrice(modelId + suffix)).toEqual({ modelId, input, output, cacheRead })
+    }
+  }
+  expect(resolvePrice(undefined)).toBeUndefined()
+  expect(resolvePrice('demo-unpriced-model')).toBeUndefined()
+  expect(estimateCost(MEASURED_USAGE, 'demo-unpriced-model')).toBeUndefined()
+})
+
+test('API estimates price all four token fields and cache writes at 1.25 times input', () => {
+  expectCost(estimateCost(MEASURED_USAGE, 'haiku'), 0.0052)
+  expectCost(estimateCost(SESSION_USAGE, 'haiku'), 0.00363)
+  expectCost(estimateCost(SESSION_USAGE, 'claude-sonnet-5-5[1m]'), 0.00726)
+  expectCost(estimateCost(SESSION_USAGE, 'claude-opus-5-5[1m]'), 0.01172)
+  expectCost(estimateCost(SESSION_USAGE, 'claude-opus-5'), 0.01815)
+  expectCost(estimateCost(ZERO_USAGE, 'haiku'), 0)
+})
+
+test('API estimates keep four decimal places below one cent and fewer for larger amounts', () => {
+  for (const [amount, formatted] of [
+    [0, '$0.0000'], [0.000006, '$0.0000'], [0.0052, '$0.0052'],
+    [0.01, '$0.010'], [0.0312, '$0.031'], [0.999, '$0.999'],
+    [1, '$1.00'], [12.345, '$12.35'],
+  ] as const) expect(formatCost(amount)).toBe(formatted)
+})
+
+for (const lang of ['en', 'ja'] as const) {
+  for (const context of ['compact', 'full'] as const) {
+    test(`${lang} ${context} API estimate is on by default in compact and full panes on both surfaces`, { options: { language: lang, context } }, async ($, on) => {
+      const reply = { ...EXPLANATION, text: 'Demo guidance.', usage: MEASURED_USAGE }
+      const calls = engineBeneath(on, {}, {
+        toolDelay: 1000, messages: [], completeReply: reply, forkReply: reply,
+        sessionModel: 'claude-opus-5-5[1m]',
+      })
+      const asked = ask($)
+      await calls.clock.settle()
+      const model = context === 'compact' ? 'haiku' : 'session'
+      const modelId = context === 'compact' ? 'claude-haiku-4-5' : 'claude-opus-5-5[1m]'
+      const cost = context === 'compact' ? 0.0052 : 0.0208
+      const amount = context === 'compact' ? '$0.0052' : '$0.021'
+      const line = USAGE_LINE[lang] + model + COST_SUFFIX[lang](amount)
+      expect(calls.savedEntries[0]).toMatchObject({ usage: MEASURED_USAGE, usageModel: model, usageModelId: modelId })
+      expectCost(calls.savedEntries[0]?.costUsd, cost)
+      expectCost(calls.savedCostTotal?.usd, cost)
+      expect(calls.savedCostTotal).toMatchObject({ hasPricedUsage: true, hasUnpricedUsage: false, tokens: 2752 })
+      expect(calls.sessionModelLookups).toBe(context === 'compact' ? 0 : 1)
+      for (const surface of SURFACES) {
+        const ui = await mountPane($, surface, { ...COMPACT_PROPS, bodyColumns: 200 })
+        expect((await ui.find({ type: 'Text', text: line }))?.props.dimColor).toBe(true)
+        expect(compactTextRows(await ui.drawn()).length).toBeLessThanOrEqual(COMPACT_PROPS.scroll!.bodyRows)
+        expect(await ui.find({ key: 'deep' })).toBeDefined()
+        await ui.unmount()
+      }
+      await calls.clock.advance(1000)
+      await asked
+      for (const surface of SURFACES) {
+        const ui = await mountPane($, surface, { ...PANE_PROPS, bodyColumns: 200 })
+        expect((await ui.find({ type: 'Text', text: line }))?.props.dimColor).toBe(true)
+        expect((await ui.find({ type: 'Text', text: sessionTokenLine(lang, '2.8k') + COST_SUFFIX[lang](amount) }))?.props.dimColor).toBe(true)
+        await ui.unmount()
+      }
+    })
+
+    test(`${lang} showCost off keeps ${context} usage and session totals token-only on both surfaces`, { options: { language: lang, context, showCost: 'off' } }, async ($, on) => {
+      const reply = { ...EXPLANATION, usage: MEASURED_USAGE }
+      const calls = engineBeneath(on, {}, { completeReply: reply, forkReply: reply, sessionModel: 'claude-opus-5-5' })
+      await ask($)
+      await calls.clock.settle()
+      const model = context === 'compact' ? 'haiku' : 'session'
+      expectCost(calls.savedEntries[0]?.costUsd, context === 'compact' ? 0.0052 : 0.0208)
+      for (const surface of SURFACES) {
+        const ui = await mountPane($, surface)
+        expect(await ui.find({ type: 'Text', text: USAGE_LINE[lang] + model })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: sessionTokenLine(lang, '2.8k') })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: /\$/ })).toBeUndefined()
+        await ui.unmount()
+      }
+    })
+  }
+
+  for (const carriesUsage of [false, true]) {
+    test(`${lang} fallback estimate prices the fork with its session model and completion with Haiku on both surfaces${carriesUsage ? ' including fork spend' : ''}`, { options: { language: lang, context: 'full' } }, async ($, on) => {
+      const forkReply: ModelForkResult = carriesUsage
+        ? { isAnswered: false, reason: 'nothing-to-fork', usage: SESSION_USAGE } as ModelForkResult
+        : { isAnswered: false, reason: 'nothing-to-fork' }
+      const calls = engineBeneath(on, {}, { sessionModel: 'claude-opus-5-5', forkReply, completeReply: { ...EXPLANATION, usage: MEASURED_USAGE } })
+      await ask($)
+      await calls.clock.settle()
+      expect(calls.savedEntries[0]).toMatchObject({ usageModel: 'haiku', usageModelId: 'claude-haiku-4-5' })
+      expectCost(calls.savedEntries[0]?.costUsd, carriesUsage ? 0.01692 : 0.0052)
+      expectCost(calls.savedCostTotal?.usd, carriesUsage ? 0.01692 : 0.0052)
+      expect(calls.savedCostTotal).toMatchObject({ hasPricedUsage: true, hasUnpricedUsage: false, tokens: carriesUsage ? 18400 : 2752 })
+      const tokenLine = carriesUsage
+        ? lang === 'en'
+          ? 'tokens · in 2,660 · cache read 14,000 · cache write 1,048 · out 692 · haiku'
+          : 'トークン ・ 入力 2,660 ・ キャッシュ読込 14,000 ・ キャッシュ書込 1,048 ・ 出力 692 ・ haiku'
+        : USAGE_LINE[lang] + 'haiku'
+      const amount = carriesUsage ? '$0.017' : '$0.0052'
+      for (const surface of SURFACES) {
+        const ui = await mountPane($, surface)
+        expect(await ui.find({ type: 'Text', text: tokenLine + COST_SUFFIX[lang](amount) })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: sessionTokenLine(lang, carriesUsage ? '18.4k' : '2.8k') + COST_SUFFIX[lang](amount) })).toBeDefined()
+        await ui.unmount()
+      }
+    })
+  }
+
+  for (const modelThrows of [false, true]) {
+    test(`${lang} ${modelThrows ? 'unavailable' : 'unknown'} session model shows full tokens without a dollar estimate on both surfaces`, { options: { language: lang, context: 'full' } }, async ($, on) => {
+      const calls = engineBeneath(on, {}, { modelThrows, forkReply: { ...EXPLANATION, usage: SESSION_USAGE } })
+      await ask($)
+      await calls.clock.settle()
+      expect(calls.fork).toBe(1)
+      expect(calls.savedEntries[0]).toMatchObject({ explainState: 'done', usage: SESSION_USAGE, usageModel: 'session' })
+      expect(calls.savedEntries[0]?.costUsd).toBeUndefined()
+      expect(calls.savedCostTotal).toMatchObject({ usd: 0, hasPricedUsage: false, hasUnpricedUsage: true, tokens: 15648 })
+      for (const surface of SURFACES) {
+        const ui = await mountPane($, surface)
+        expect(await ui.find({ type: 'Text', text: SESSION_USAGE_LINE[lang] })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: sessionTokenLine(lang, '15.6k') })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: /\$/ })).toBeUndefined()
+        await ui.unmount()
+      }
+    })
+  }
+
+  test(`${lang} session estimate sums priced requests and appends plus for an unknown rerun on both surfaces`, { options: { language: lang } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, { completeReply: { ...EXPLANATION, usage: MEASURED_USAGE }, forkReply: { ...EXPLANATION, usage: SESSION_USAGE } })
+    await ask($)
+    await calls.clock.settle()
+    const rerun = await mountPane($, 'desktop')
+    await rerun.press({ key: 'deep' })
+    await calls.clock.settle()
+    await rerun.unmount()
+    expect(calls.savedEntries[0]?.costUsd).toBeUndefined()
+    expectCost(calls.savedCostTotal?.usd, 0.0052)
+    expect(calls.savedCostTotal).toMatchObject({ hasPricedUsage: true, hasUnpricedUsage: true, tokens: 18400 })
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      expect(await ui.find({ type: 'Text', text: SESSION_USAGE_LINE[lang] })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: sessionTokenLine(lang, '18.4k') + COST_SUFFIX[lang]('$0.0052+') })).toBeDefined()
+      await ui.unmount()
+    }
+  })
+}
+
+test('a fallback with unknown fork spend keeps only the Haiku estimate and marks both estimates partial', { options: { context: 'full', language: 'en' } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, {
+    forkReply: { isAnswered: false, reason: 'nothing-to-fork', usage: SESSION_USAGE } as ModelForkResult,
+    completeReply: { ...EXPLANATION, usage: MEASURED_USAGE },
+  })
+  await ask($)
+  await calls.clock.settle()
+  expect(calls.savedEntries[0]).toMatchObject({ usageModelId: 'claude-haiku-4-5', costIncomplete: true })
+  expectCost(calls.savedEntries[0]?.costUsd, 0.0052)
+  expect(calls.savedCostTotal).toMatchObject({ hasPricedUsage: true, hasUnpricedUsage: true, tokens: 18400 })
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: 'tokens · in 2,660 · cache read 14,000 · cache write 1,048 · out 692 · haiku' + COST_SUFFIX.en('$0.0052+') })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: sessionTokenLine('en', '18.4k') + COST_SUFFIX.en('$0.0052+') })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('full requests capture the current session model before completion and sum model changes', { options: { context: 'full', language: 'en' } }, async ($, on) => {
+  const options: EngineOptions = { sessionModel: 'claude-opus-5-5[1m]', forkDelay: 1000, forkReply: { ...EXPLANATION, usage: MEASURED_USAGE } }
+  const calls = engineBeneath(on, {}, options)
+  await ask($, QUESTIONS, 'demo_priced_opus')
+  await calls.clock.settle()
+  options.sessionModel = 'claude-sonnet-5-5[1m]'
+  await calls.clock.advance(1000)
+  expect(calls.savedEntries[0]).toHaveProperty('usageModelId', 'claude-opus-5-5[1m]')
+  expectCost(calls.savedEntries[0]?.costUsd, 0.0208)
+  await ask($, QUESTIONS, 'demo_priced_sonnet')
+  await calls.clock.settle()
+  await calls.clock.advance(1000)
+  expect(calls.savedEntries[1]).toHaveProperty('usageModelId', 'claude-sonnet-5-5[1m]')
+  expectCost(calls.savedEntries[1]?.costUsd, 0.0104)
+  expectCost(calls.savedCostTotal?.usd, 0.0312)
+  expect(calls.sessionModelLookups).toBe(2)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: sessionTokenLine('en', '5.5k') + COST_SUFFIX.en('$0.031') })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('priced reruns replace entry cost while the session keeps every request', async ($, on) => {
+  const calls = engineBeneath(on, {}, {
+    sessionModel: 'claude-opus-5-5', completeReply: { ...EXPLANATION, usage: MEASURED_USAGE }, forkReply: { ...EXPLANATION, usage: SESSION_USAGE },
+  })
+  await ask($)
+  await calls.clock.settle()
+  const ui = await mountPane($, 'desktop')
+  await ui.press({ key: 'deep' })
+  expectCost(calls.savedEntries[0]?.costUsd, 0.01172)
+  expectCost(calls.savedCostTotal?.usd, 0.01692)
+  await ui.press({ key: 'deep' })
+  expectCost(calls.savedEntries[0]?.costUsd, 0.01172)
+  expectCost(calls.savedCostTotal?.usd, 0.02864)
+  expect(calls.savedCostTotal).toMatchObject({ hasPricedUsage: true, hasUnpricedUsage: false, tokens: 34048 })
+  await ui.unmount()
+})
+
+test('a pending priced rerun clears the selected cost while keeping prior session spend on both surfaces', { options: { language: 'en' } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, {
+    sessionModel: 'claude-opus-5-5', forkDelay: 1000,
+    completeReply: { ...EXPLANATION, usage: MEASURED_USAGE }, forkReply: { ...EXPLANATION, usage: SESSION_USAGE },
+  })
+  await ask($)
+  await calls.clock.settle()
+  const first = await mountPane($, 'terminal')
+  const rerun = first.press({ key: 'deep' })
+  await calls.clock.settle()
+  expect(calls.savedEntries[0]).toHaveProperty('explainState', 'pending')
+  expect(calls.savedEntries[0]).not.toHaveProperty('costUsd')
+  expect(calls.savedEntries[0]).not.toHaveProperty('costIncomplete')
+  expectCost(calls.savedCostTotal?.usd, 0.0052)
+  for (const surface of SURFACES) {
+    const ui = surface === 'terminal' ? first : await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: USAGE_PATTERN })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: sessionTokenLine('en', '2.8k') + COST_SUFFIX.en('$0.0052') })).toBeDefined()
+    if (surface !== 'terminal') await ui.unmount()
+  }
+  await calls.clock.advance(1000)
+  await rerun
+  expectCost(calls.savedEntries[0]?.costUsd, 0.01172)
+  expectCost(calls.savedCostTotal?.usd, 0.01692)
+  await first.unmount()
+})
+
+test('session tokens saved before pricing are marked as uncovered after a priced request on both surfaces', { options: { language: 'en' } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, { completeReply: { ...EXPLANATION, usage: MEASURED_USAGE } })
+  on('state.get', { plugin: 'qa-guide', key: 'usageTotal' }, async (_$, e, next) => {
+    const ran = await next(e)
+    return calls.savedUsageTotal === undefined && ran.value
+      ? { ...ran, value: { ...ran.value, value: 1000 } } as never
+      : ran
+  })
+  await ask($)
+  await calls.clock.settle()
+  expect(calls.savedUsageTotal).toBe(3752)
+  expectCost(calls.savedCostTotal?.usd, 0.0052)
+  expect(calls.savedCostTotal?.tokens).toBe(2752)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: sessionTokenLine('en', '3.8k') + COST_SUFFIX.en('$0.0052+') })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('concurrent priced completions each contribute once to the session estimate', async ($, on) => {
+  const calls = engineBeneath(on, {}, { completeDelay: 1000, completeReply: { ...EXPLANATION, usage: MEASURED_USAGE } })
+  await ask($, QUESTIONS, 'demo_priced_concurrent_first')
+  await ask($, QUESTIONS, 'demo_priced_concurrent_second')
+  await calls.clock.settle()
+  await calls.clock.advance(1000)
+  for (const entry of calls.savedEntries) expectCost(entry.costUsd, 0.0052)
+  expectCost(calls.savedCostTotal?.usd, 0.0104)
+  expect(calls.savedCostTotal).toMatchObject({ hasPricedUsage: true, hasUnpricedUsage: false, tokens: 5504 })
+})
+
+for (const surface of SURFACES) {
+  test(`superseded priced compact usage is retained in the session without overwriting the full estimate on ${surface}`, async ($, on) => {
+    const calls = engineBeneath(on, {}, {
+      sessionModel: 'claude-opus-5-5', toolDelay: 100, completeDelay: 1000,
+      forkReply: { ...EXPLANATION, text: 'CURRENT_FULL_DEMO', usage: SESSION_USAGE },
+      completeReply: { isAnswered: false, reason: 'empty-reply', usage: MEASURED_USAGE },
+    })
+    const asked = ask($)
+    await calls.clock.settle()
+    await calls.clock.advance(100)
+    await asked
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'deep' })
+    expectCost(calls.savedEntries[0]?.costUsd, 0.01172)
+    expectCost(calls.savedCostTotal?.usd, 0.01172)
+    await calls.clock.advance(900)
+    expect(calls.savedEntries[0]).toMatchObject({ explainState: 'done', explanation: 'CURRENT_FULL_DEMO', usageModelId: 'claude-opus-5-5' })
+    expectCost(calls.savedEntries[0]?.costUsd, 0.01172)
+    expectCost(calls.savedCostTotal?.usd, 0.01692)
+    expect(calls.savedCostTotal).toMatchObject({ hasPricedUsage: true, hasUnpricedUsage: false, tokens: 18400 })
+    await ui.unmount()
+  })
+}
 
 test('prompt submission records only the person origins and forwards every original input unchanged', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {})

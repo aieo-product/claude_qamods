@@ -10,6 +10,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 - Measured token usage for each AI explanation: input, cache read, cache write and output, with `haiku` or `session` model labels
 - Session token total in the full-view toolbar, including re-runs and completed superseded calls
+- API-price estimates beside measured usage and the session total, using built-in USD list prices as of 2026-09; `showCost` defaults to `on` and can be set to `off`
 
 ### Changed
 

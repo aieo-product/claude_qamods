@@ -27,6 +27,16 @@
       ],
       "default": "auto"
     },
+    "showCost": {
+      "type": "string",
+      "title": "API price estimate",
+      "description": "Show an API-price estimate beside measured tokens (subscriptions use usage limits).",
+      "options": [
+        "on",
+        "off"
+      ],
+      "default": "on"
+    },
     "context": {
       "type": "string",
       "title": "Context",

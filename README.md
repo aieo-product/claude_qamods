@@ -70,7 +70,7 @@ Run these commands inside Claude Code:
 /plugin install qa-guide@claude-qamods
 ```
 
-The installer may report unset `userConfig` options. You can ignore this: `language` defaults to `auto` and `context` defaults to `compact`. To change either option, run `/plugin configure qa-guide@claude-qamods` or use `/config`.
+The installer may report unset `userConfig` options. You can ignore this: `language` defaults to `auto`, `context` to `compact`, and `showCost` to `on`. To change an option, run `/plugin configure qa-guide@claude-qamods` or use `/config`.
 
 To update, run `/plugin marketplace update claude-qamods` and then `/plugin update qa-guide@claude-qamods`. To remove it, run `/plugin uninstall qa-guide@claude-qamods`.
 
@@ -87,6 +87,10 @@ Run `/config` and set qa-guide's `language` option to `en` or `ja` to choose a f
 ![A compact-context explanation with the Full context button](docs/images/compact-context.png)
 
 The `context` option defaults to `compact`: explanations use a bounded summary and Haiku, so their input does not grow with the session. Set `context` to `full` in `/config` to use the whole session for every new explanation. For one question, choose **Full context** to replace its explanation with a new one using the whole session. The button can be clicked on surfaces that support clicks. After answering, focus the pane and press `f`.
+
+In the Claude Desktop app, the **Full context** button can be clicked while the question dialog is still open.
+
+The `showCost` option is an `on` / `off` picker and defaults to `on`. Set it to `off` in `/config` or `/plugin configure qa-guide@claude-qamods` to show measured tokens without the API-price estimate.
 
 | Control | Where | Action |
 | --- | --- | --- |
@@ -124,6 +128,8 @@ With `context: full` or **Full context**, qa-guide uses `$.model.fork` to ask on
 
 ### Token usage per question
 
+![Measured tokens and an API-price estimate for a full-context explanation](docs/images/token-usage.png)
+
 | | What is sent | Approximate tokens |
 | --- | --- | --- |
 | **Pane (no AI)** | Nothing. Your recent prompts and Claude's lead-up text are read from the local session. | 0 |
@@ -132,10 +138,11 @@ With `context: full` or **Full context**, qa-guide uses `$.model.fork` to ask on
 | **Full-context fallback** | Only when there is no transcript to fork yet: a short prompt with the recent instructions, Claude's lead-up text and the questions. | Input: typically ~1,500–4,000.<br>Output: up to 1,500. |
 
 - **Measured usage.** Each completed explanation shows its measured input, cache-read, cache-write and output tokens, labelled `haiku` or `session` for the model used. The compact view shows this line when a row is available. A **Full context** re-run replaces that entry's usage with the new result.
-- **Session total.** The full-view toolbar shows the total of all four token fields across qa-guide's model calls in the session, including re-runs and completed calls whose results were superseded. This total survives a hot reload and resets when the session ends.
-- **Which model.** Compact explanations and the full-context fallback use the `haiku` alias, which Claude Code resolves to its current Haiku model. Full-context forks run on the model your session is using right now, so switching with `/model` changes them too.
+- **API-price estimate.** By default, the usage line ends with an estimate such as `≈ $0.0052 (API price)`. It multiplies measured tokens by a built-in table of USD list prices as of **2026-09**, including cache reads and cache writes (1.25 × the input rate). This table must be updated when prices change. Unknown models show tokens only.
+- **Session total.** The full-view toolbar shows the total of all four token fields across qa-guide's model calls in the session, including re-runs and completed calls whose results were superseded, with the API-price estimate beside it. The cost sums only priced calls; `+`, as in `≈ $0.031+`, means some usage could not be priced. These totals survive a hot reload and reset when the session ends.
+- **Which model.** Compact explanations and the full-context fallback use the `haiku` alias, priced as `claude-haiku-4-5`. Full-context forks run on the session's model, whose ID is read when the request starts, so switching with `/model` changes them too. If a full-context run falls back to Haiku, the fork and fallback usage are priced separately and added together.
 - **Cache misses in full context.** The fork's transcript prefix is identical to the session's last request, so it is normally served from the prompt cache. If the cache has expired, or right after `/model`, the whole transcript is processed as fresh input once. Compact mode never forks the transcript.
-- **Plans.** With a Pro or Max subscription these tokens count against your usage limits rather than being billed per token.
+- **Plans.** With a Pro or Max subscription these tokens count against your usage limits rather than being billed per token. The API-price estimate is a comparison with API list prices, not a subscription charge.
 
 ## Troubleshooting
 

@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ModelForkResult, ModelUsage, Register, SessionMessage } from 'claude-code'
 
 import type { QaEntry, QaQuestion } from '../types'
+import { estimateCost, formatCost, resolvePrice } from './pricing'
 
 const PANE = 'qa-guide'
 type Lang = QaEntry['lang']
@@ -42,6 +43,7 @@ const STRINGS = {
     aiPrefix: '✦ AI explanation: ',
     usageLine: 'tokens · in {input} · cache read {read} · cache write {write} · out {output} · {model}',
     sessionUsage: 'AI tokens this session: {total}',
+    apiPrice: '≈ {cost} (API price)',
     thousands: '{count}k',
     haikuModel: 'haiku',
     sessionModel: 'session',
@@ -124,6 +126,7 @@ const STRINGS = {
     aiPrefix: '✦ AI解説: ',
     usageLine: 'トークン ・ 入力 {input} ・ キャッシュ読込 {read} ・ キャッシュ書込 {write} ・ 出力 {output} ・ {model}',
     sessionUsage: 'このセッションのAIトークン: {total}',
+    apiPrice: '≈ {cost}（API料金換算）',
     thousands: '{count}k',
     haikuModel: 'haiku',
     sessionModel: 'session',
@@ -211,6 +214,14 @@ const isAiOn = atom({ plugin: 'qa-guide', key: 'isAiOn' } as const, true)
 const showHistory = atom({ plugin: 'qa-guide', key: 'showHistory' } as const, false)
 const cursor = atom({ plugin: 'qa-guide', key: 'cursor' } as const, 0)
 const usageTotal = atom({ plugin: 'qa-guide', key: 'usageTotal' } as const, 0)
+const costTotal = atom({ plugin: 'qa-guide', key: 'costTotal' } as const, {
+  usd: 0, hasPricedUsage: false, hasUnpricedUsage: false, tokens: 0,
+})
+
+const costSuffix = (lang: Lang, usd: number | undefined, incomplete = false): string =>
+  usd === undefined ? '' : `${lang === 'ja' ? ' ・ ' : ' · '}${t(lang, 'apiPrice', {
+    cost: formatCost(usd) + (incomplete ? '+' : ''),
+  })}`
 
 const addUsage = (previous: ModelUsage | undefined, usage: ModelUsage): ModelUsage => ({
   input_tokens: (previous?.input_tokens ?? 0) + usage.input_tokens,
@@ -528,18 +539,42 @@ async function explain(
     x.id === entryId ? {
       ...x, explainMode: mode, explainState: 'pending' as const, explanation: '',
       usage: undefined, usageModel: undefined,
+      usageModelId: undefined, costUsd: undefined, costIncomplete: undefined,
     } : x,
   ))
   if (runIds.get(entryId) !== runId) return
 
   let usage: ModelUsage | undefined
   let usageModel: QaEntry['usageModel'] = mode === 'compact' ? 'haiku' : 'session'
-  const recordUsage = async (reply: ModelForkResult) => {
+  const haikuModelId = resolvePrice('haiku')!.modelId
+  let usageModelId: string | undefined = haikuModelId
+  if (mode === 'full') {
+    try {
+      usageModelId = await $.session.model()
+    } catch {
+      // A missing model lookup must not prevent the explanation itself.
+      usageModelId = undefined
+    }
+    if (runIds.get(entryId) !== runId) return
+  }
+  let costUsd: number | undefined
+  let costIncomplete = false
+  const recordUsage = async (reply: ModelForkResult, modelId: string | undefined) => {
     // Spend belongs to the session even when this run has been superseded.
     // nothing-to-fork has no usage, since no request was made.
     if ('usage' in reply) {
       usage = addUsage(usage, reply.usage)
-      await update($, usageTotal, total => total + tokenCount(reply.usage))
+      const tokens = tokenCount(reply.usage)
+      const cost = estimateCost(reply.usage, modelId)
+      if (cost === undefined) costIncomplete = true
+      else costUsd = (costUsd ?? 0) + cost
+      await update($, usageTotal, total => total + tokens)
+      await update($, costTotal, total => ({
+        usd: total.usd + (cost ?? 0),
+        hasPricedUsage: total.hasPricedUsage || cost !== undefined,
+        hasUnpricedUsage: total.hasUnpricedUsage || cost === undefined,
+        tokens: total.tokens + tokens,
+      }))
     }
     return reply
   }
@@ -552,25 +587,27 @@ async function explain(
         model: 'haiku',
         prompt,
         maxTokens: 1500,
-      }).then(recordUsage)
-    : $.model.fork({ prompt }).then(recordUsage).then(reply => {
+      }).then(reply => recordUsage(reply, haikuModelId))
+    : $.model.fork({ prompt }).then(reply => recordUsage(reply, usageModelId)).then(reply => {
         // Before the first response there is no transcript to fork.
         if (reply.isAnswered || reply.reason !== 'nothing-to-fork') return reply
         if (runIds.get(entryId) !== runId) return reply
         usageModel = 'haiku'
+        usageModelId = haikuModelId
         const context = entry.lead.trim() ? `\n\n${t(entry.lang ?? 'ja', 'leadData')}\n${JSON.stringify(entry.lead)}` : ''
-        return $.model.complete({ model: 'haiku', prompt: prompt + context, maxTokens: 1500 }).then(recordUsage)
+        return $.model.complete({ model: 'haiku', prompt: prompt + context, maxTokens: 1500 })
+          .then(reply => recordUsage(reply, haikuModelId))
       })
   void request.then(
     reply => update($, entries, list => runIds.get(entryId) !== runId ? list : list.map(x =>
       x.id === entryId
         ? reply.isAnswered
-          ? { ...x, explainState: 'done' as const, explanation: clip(reply.text, 6000), usage, usageModel }
-          : { ...x, explainState: 'error' as const, explanation: String(reply.reason), usage, usageModel }
+          ? { ...x, explainState: 'done' as const, explanation: clip(reply.text, 6000), usage, usageModel, usageModelId, costUsd, costIncomplete }
+          : { ...x, explainState: 'error' as const, explanation: String(reply.reason), usage, usageModel, usageModelId, costUsd, costIncomplete }
         : x,
     )),
     () => update($, entries, list => runIds.get(entryId) !== runId ? list : list.map(x =>
-      x.id === entryId ? { ...x, explainState: 'error' as const, usage, usageModel } : x,
+      x.id === entryId ? { ...x, explainState: 'error' as const, usage, usageModel, usageModelId, costUsd, costIncomplete } : x,
     )),
   ).catch(() => {
     // The session (or this module) may have ended while the explanation ran.
@@ -721,11 +758,15 @@ export const register: Register = (on, options) => {
     const aiOn = await read($, isAiOn)
     const history = await read($, showHistory)
     const total = await read($, usageTotal)
+    const cost = await read($, costTotal)
+    const showCost = options.showCost !== 'off'
     const width = Math.max(20, e.props.bodyColumns)
     const selectedCursor = clampCursor(await read($, cursor), list.length)
     const newest = list[list.length - 1]
     const current = newest?.status === 'open' ? newest : list[list.length - 1 - selectedCursor]
     const lang = current?.lang ?? await resolveLang($, options.language)
+    const sessionCost = showCost && cost.hasPricedUsage
+      ? costSuffix(lang, cost.usd, cost.hasUnpricedUsage || total > cost.tokens) : ''
 
     const navigate = async (select: (value: number) => number) => {
       await update($, cursor, value => clampCursor(select(clampCursor(value, list.length)), list.length))
@@ -788,7 +829,7 @@ export const register: Register = (on, options) => {
           />
           <Button key="close" role="dismiss" plain label={t(lang, 'close')} onPress={() => $.ui.close({ id: PANE })} />
         </Box>
-        <Text dimColor>{t(lang, 'sessionUsage', { total: totalTokens(lang, total) })}</Text>
+        <Text dimColor>{t(lang, 'sessionUsage', { total: totalTokens(lang, total) })}{sessionCost}</Text>
       </Box>
     )
 
@@ -816,7 +857,7 @@ export const register: Register = (on, options) => {
       write: groupedTokens(current.usage.cache_creation_input_tokens),
       output: groupedTokens(current.usage.output_tokens),
       model: t(lang, current.usageModel === 'session' ? 'sessionModel' : 'haikuModel'),
-    }) : undefined
+    }) + (showCost ? costSuffix(lang, current.costUsd, current.costIncomplete) : '') : undefined
     const deepButton = <Button key="deep" hotkey="f" plain label={t(lang, 'deep')} onPress={() => explain($, current.id, 'full', compactContexts, runIds)} />
 
     if (newest?.status === 'open') {
