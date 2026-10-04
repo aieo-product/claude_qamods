@@ -112,7 +112,19 @@ The AI explanation uses `$.model.fork`, which asks one tool-less question over t
 
 - **Nothing leaves your session.** qa-guide sends no network requests of its own. The AI explanation is one extra request through Claude Code, on the account the session already uses: a fork of the same transcript on the session's model, or, for a question asked before the first response, a short `haiku` request with the instructions and question text.
 - **Nothing is written to disk.** Prompts, questions and answers are kept in session memory (`$.state`) and are gone when the session ends.
-- **Cost.** Each question with AI explanations on adds one model call. The call reuses the session's prompt cache when it can, so it is usually cheap, but it is not free. An expired cache or a model switch can make it more expensive. Press `a` to turn explanations off.
+- **Cost.** Each question with AI explanations on adds one model call. Press `a` to turn explanations off; the pane itself never calls a model.
+
+### Token usage per question
+
+| | What is sent | Approximate tokens |
+| --- | --- | --- |
+| **Pane (no AI)** | Nothing. Your recent prompts and Claude's lead-up text are read from the local session. | 0 |
+| **AI explanation (normal)** | A fork of the whole session transcript, plus qa-guide's instructions, your last 3 prompts (up to 600 characters each) and the question. | Transcript: read from the prompt cache (as many tokens as the session holds).<br>Added input: ~1,000–3,000.<br>Output: ~500–1,000, more if the model thinks. |
+| **AI explanation (fallback)** | Only when Claude asks before its first response: qa-guide's instructions, your prompts, the last 2,500 characters of Claude's text, and the question. No transcript. | Input: ~1,500–4,000.<br>Output: up to 1,500. |
+
+- **Which model.** The fork always runs on the model your session is using right now, so switching with `/model` (or a newer default in Claude Code) changes it too. The fallback uses the `haiku` alias, which Claude Code resolves to its current Haiku model.
+- **Cache misses.** The fork's transcript prefix is identical to the session's last request, so it is normally served from the prompt cache. If the cache has expired, or right after `/model`, the whole transcript is processed as fresh input once.
+- **Plans.** With a Pro or Max subscription these tokens count against your usage limits rather than being billed per token.
 
 ## Troubleshooting
 
