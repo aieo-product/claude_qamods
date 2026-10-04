@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- Korean pane labels, notifications and AI explanations: `auto` selects Korean when a question or option label contains Hangul (kana still selects Japanese first), and the `language` option accepts `ko`
+- Korean fallback before a question: Claude Code's language setting `Korean` / `ko*`, then a locale starting with `ko`
+
 ## [0.2.0] - 2026-10-04
 
 ### Added

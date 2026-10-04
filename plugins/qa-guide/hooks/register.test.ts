@@ -7,6 +7,12 @@ import type { QaEntry } from '../types'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
+const LABELS = {
+  en: { title: 'Question guide', heading: '### Current instructions', ai: 'AI explanation: ON', history: 'History (0)', close: 'Close', empty: /No questions yet/, description: /question guide/i },
+  ja: { title: '質問ガイド', heading: '### いまの指示（概要）', ai: 'AI解説: ON', history: '履歴 (0)', close: '閉じる', empty: /まだ質問はありません/, description: /質問ガイド/ },
+  ko: { title: '질문 가이드', heading: '### 지금 받은 지시', ai: 'AI 해설: ON', history: '기록 (0)', close: '닫기', empty: /아직 질문이 없어요/, description: /질문 가이드/ },
+} as const
+
 // Word-wrapped rows drop the space at the break; rejoin Latin breaks with one.
 const joinRows = (rows: string[]) => rows.reduce((acc, row) =>
   !acc ? row : /[\x21-\x7e]$/.test(acc) && /^[\x21-\x7e]/.test(row) ? `${acc} ${row}` : acc + row, '')
@@ -25,6 +31,9 @@ const DETECTION_CASES = [
   { name: 'half-width kana outside the specified detection range', question: 'Which label?', labels: ['ｶﾀｶﾅ', 'ASCII'], lang: 'en' },
   { name: 'Chinese without kana', question: '请选择数据库', labels: ['本地存储', '云存储'], lang: 'en' },
   { name: 'kanji without kana', question: '選択肢', labels: ['保存', '取消'], lang: 'en' },
+  { name: 'Hangul question', question: '어떤 데이터베이스를 쓸까요?', labels: ['SQLite', 'PostgreSQL'], lang: 'ko' },
+  { name: 'Hangul option', question: 'Proceed?', labels: ['네', 'No'], lang: 'ko' },
+  { name: 'kana before Hangul', question: 'どれ? 어느 쪽?', labels: ['A', 'B'], lang: 'ja' },
 ] as const
 
 for (const { name, question, labels, lang } of DETECTION_CASES) {
@@ -34,9 +43,9 @@ for (const { name, question, labels, lang } of DETECTION_CASES) {
     await ask($, questions)
     await calls.clock.settle()
     expect(calls.savedEntries[0]).toHaveProperty('lang', lang)
-    expect(calls.opened).toEqual([{ id: 'qa-guide', title: lang === 'ja' ? '質問ガイド' : 'Question guide' }])
+    expect(calls.opened).toEqual([{ id: 'qa-guide', title: LABELS[lang].title }])
     expect(calls.languageLookups).toEqual([])
-    expect(calls.forkPrompts[0]).toContain(lang === 'ja' ? '### いまの指示（概要）' : '### Current instructions')
+    expect(calls.forkPrompts[0]).toContain(LABELS[lang].heading)
   })
 }
 
@@ -1670,7 +1679,7 @@ test('automatic detection includes labels in later questions', { options: { lang
   expect(calls.savedEntries[0]).toHaveProperty('lang', 'ja')
 })
 
-for (const language of ['en', 'ja'] as const) {
+for (const language of ['en', 'ja', 'ko'] as const) {
   test(`the ${language} option overrides opposite question text and bypasses fallback reads`, { options: { language } }, async ($, on) => {
     const questions = language === 'en' ? JAPANESE_QUESTIONS : QUESTIONS
     const calls = engineBeneath(on, {}, { configThrows: true, envThrows: ['LC_ALL', 'LANG'] })
@@ -1678,7 +1687,7 @@ for (const language of ['en', 'ja'] as const) {
     await calls.clock.settle()
     expect(calls.savedEntries[0]).toHaveProperty('lang', language)
     expect(calls.languageLookups).toEqual([])
-    expect(calls.forkPrompts[0]).toContain(language === 'en' ? '### Current instructions' : '### いまの指示（概要）')
+    expect(calls.forkPrompts[0]).toContain(LABELS[language].heading)
     expect(calls.forkPrompts[0]).toContain(JSON.stringify(questions, null, 1))
   })
 
@@ -1686,23 +1695,23 @@ for (const language of ['en', 'ja'] as const) {
     const calls = engineBeneath(on, {}, { configThrows: true, envThrows: ['LC_ALL', 'LANG'] })
     for (const surface of SURFACES) {
       const ui = await mountPane($, surface)
-      expect((await ui.find({ key: 'ai' }))?.props.label).toBe(language === 'en' ? 'AI explanation: ON' : 'AI解説: ON')
-      expect((await ui.find({ key: 'hist' }))?.props.label).toBe(language === 'en' ? 'History (0)' : '履歴 (0)')
-      expect((await ui.find({ key: 'close' }))?.props.label).toBe(language === 'en' ? 'Close' : '閉じる')
-      expect(await ui.find({ type: 'Text', text: language === 'en' ? /No questions yet/ : /まだ質問はありません/ })).toBeDefined()
+      expect((await ui.find({ key: 'ai' }))?.props.label).toBe(LABELS[language].ai)
+      expect((await ui.find({ key: 'hist' }))?.props.label).toBe(LABELS[language].history)
+      expect((await ui.find({ key: 'close' }))?.props.label).toBe(LABELS[language].close)
+      expect(await ui.find({ type: 'Text', text: LABELS[language].empty })).toBeDefined()
       await ui.unmount()
     }
     await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
     const ran = await $.command.run({ command: 'qa-guide', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
     expect(calls.registered).toEqual(['qa-guide'])
-    expect(language === 'en' ? /question guide/i.test(calls.registeredDescriptions[0] ?? '') : calls.registeredDescriptions[0]?.includes('質問ガイド')).toBe(true)
-    expect(language === 'en' ? /question guide/i.test(JSON.stringify(ran)) : JSON.stringify(ran).includes('質問ガイド')).toBe(true)
-    expect(calls.opened).toEqual([{ id: 'qa-guide', title: language === 'en' ? 'Question guide' : '質問ガイド' }])
+    expect(LABELS[language].description.test(calls.registeredDescriptions[0] ?? '')).toBe(true)
+    expect(LABELS[language].description.test(JSON.stringify(ran))).toBe(true)
+    expect(calls.opened).toEqual([{ id: 'qa-guide', title: LABELS[language].title }])
     expect(calls.languageLookups).toEqual([])
   })
 }
 
-const FALLBACK_CASES: Array<{ name: string; options: EngineOptions; lang: 'en' | 'ja'; reads: string[] }> = [
+const FALLBACK_CASES: Array<{ name: string; options: EngineOptions; lang: QaEntry['lang']; reads: string[] }> = [
   { name: 'config ja before English LC_ALL', options: { configRows: [languageRow('ja')], env: { LC_ALL: 'en_US.UTF-8', LANG: 'en_US.UTF-8' } }, lang: 'ja', reads: ['config'] },
   { name: 'config English before Japanese LC_ALL', options: { configRows: [languageRow('English')], env: { LC_ALL: 'ja_JP.UTF-8' } }, lang: 'en', reads: ['config'] },
   { name: 'config Japanese before English LC_ALL', options: { configRows: [languageRow('Japanese')], env: { LC_ALL: 'en_US.UTF-8' } }, lang: 'ja', reads: ['config'] },
@@ -1713,6 +1722,9 @@ const FALLBACK_CASES: Array<{ name: string; options: EngineOptions; lang: 'en' |
   { name: 'English LC_ALL before Japanese LANG', options: { env: { LC_ALL: 'en_US.UTF-8', LANG: 'ja_JP.UTF-8' } }, lang: 'en', reads: ['config', 'LC_ALL'] },
   { name: 'Japanese LANG when LC_ALL is absent', options: { env: { LANG: 'ja_JP.UTF-8' } }, lang: 'ja', reads: ['config', 'LC_ALL', 'LANG'] },
   { name: 'Japanese LANG when LC_ALL is empty', options: { env: { LC_ALL: '', LANG: 'ja_JP.UTF-8' } }, lang: 'ja', reads: ['config', 'LC_ALL', 'LANG'] },
+  { name: 'config Korean before English LC_ALL', options: { configRows: [languageRow('Korean')], env: { LC_ALL: 'en_US.UTF-8' } }, lang: 'ko', reads: ['config'] },
+  { name: 'config ko before Japanese LANG', options: { configRows: [languageRow('ko')], env: { LANG: 'ja_JP.UTF-8' } }, lang: 'ko', reads: ['config'] },
+  { name: 'Korean LANG when LC_ALL is absent', options: { env: { LANG: 'ko_KR.UTF-8' } }, lang: 'ko', reads: ['config', 'LC_ALL', 'LANG'] },
   { name: 'English when no fallback value exists', options: {}, lang: 'en', reads: ['config', 'LC_ALL', 'LANG'] },
   { name: 'config errors fall through to LC_ALL', options: { configThrows: true, env: { LC_ALL: 'ja_JP.UTF-8' } }, lang: 'ja', reads: ['config', 'LC_ALL'] },
   { name: 'LC_ALL errors fall through to LANG', options: { envThrows: ['LC_ALL'], env: { LANG: 'ja_JP.UTF-8' } }, lang: 'ja', reads: ['config', 'LC_ALL', 'LANG'] },
@@ -1725,17 +1737,17 @@ for (const { name, options, lang, reads } of FALLBACK_CASES) {
     for (const surface of SURFACES) {
       calls.languageLookups.length = 0
       const ui = await mountPane($, surface)
-      expect((await ui.find({ key: 'ai' }))?.props.label).toBe(lang === 'ja' ? 'AI解説: ON' : 'AI explanation: ON')
+      expect((await ui.find({ key: 'ai' }))?.props.label).toBe(LABELS[lang].ai)
       expect(calls.languageLookups).toEqual(reads)
       await ui.unmount()
     }
     calls.languageLookups.length = 0
     await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
-    expect(lang === 'ja' ? calls.registeredDescriptions[0]?.includes('質問ガイド') : /question guide/i.test(calls.registeredDescriptions[0] ?? '')).toBe(true)
+    expect(LABELS[lang].description.test(calls.registeredDescriptions[0] ?? '')).toBe(true)
     expect(calls.languageLookups).toEqual(reads)
     calls.languageLookups.length = 0
     await $.command.run({ command: 'qa-guide', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
-    expect(calls.opened).toEqual([{ id: 'qa-guide', title: lang === 'ja' ? '質問ガイド' : 'Question guide' }])
+    expect(calls.opened).toEqual([{ id: 'qa-guide', title: LABELS[lang].title }])
     expect(calls.languageLookups).toEqual(reads)
   })
 }
@@ -2313,6 +2325,26 @@ test('the English fork prompt retains four sections, quoted context and exact di
   expect(prompt).toContain(JSON.stringify(NUMBERED_QUESTIONS, null, 1))
   expect(prompt).not.toContain('### いまの指示（概要）')
   expect(prompt).not.toContain('### おすすめ')
+})
+
+test('the Korean fork prompt retains four ordered sections, quoted context and dialog numbering rules', { options: { language: 'ko' } }, async ($, on) => {
+  const calls = engineBeneath(on, {})
+  await submit($, '작은 데모 보드를 만들어 줘.')
+  await ask($, NUMBERED_QUESTIONS)
+  await calls.clock.settle()
+  const prompt = calls.forkPrompts[0] ?? ''
+  const headings = ['### 지금 받은 지시', '### 왜 묻는지', '### 선택지별 영향', '### 추천']
+  for (const [i, heading] of headings.entries()) {
+    expect(prompt).toContain(heading)
+    if (i > 0) expect(prompt.indexOf(headings[i - 1]!)).toBeLessThan(prompt.indexOf(heading))
+  }
+  expect(prompt).toContain('1. <label>:')
+  expect(prompt).toContain('#### Q<n>.')
+  expect(prompt).toContain('→ Q1: 2. <label>')
+  expect(prompt).toContain(JSON.stringify(['작은 데모 보드를 만들어 줘.'], null, 1))
+  expect(prompt).toContain(JSON.stringify(NUMBERED_QUESTIONS, null, 1))
+  expect(prompt).not.toContain('### Current instructions')
+  expect(prompt).not.toContain('### いまの指示（概要）')
 })
 
 test('a question asked before the first response falls back to a stand-alone completion', async ($, on) => {

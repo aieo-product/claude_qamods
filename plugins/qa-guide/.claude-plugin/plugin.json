@@ -23,7 +23,8 @@
       "options": [
         "auto",
         "en",
-        "ja"
+        "ja",
+        "ko"
       ],
       "default": "auto"
     }

@@ -58,7 +58,7 @@ Claude's question dialog shows a question and a few short options. After a long 
 
 - **Claude Code 2.1.286 or later.** The mod uses the function-hooks plugin API, which is **early access** and may change between releases.
 - A terminal, preferably in fullscreen mode. The pane opens on its own when the terminal is at least **144 columns** wide. `/qa-guide` opens it at any width.
-- The pane labels and AI explanations support **English and Japanese**. Language selection is automatic by default; see [Usage](#usage).
+- The pane labels and AI explanations support **English, Japanese and Korean**. Language selection is automatic by default; see [Usage](#usage).
 
 ## Install
 
@@ -77,11 +77,11 @@ To update, run `/plugin marketplace update claude-qamods` and then `/plugin upda
 
 When Claude asks a question, the pane opens next to the dialog. Answer in the dialog as usual.
 
-The default language option is `auto`. A question or option label containing hiragana or katakana selects Japanese; otherwise, the pane and AI explanation use English. Chinese text alone selects English. Each history entry keeps the language chosen when it was created; entries saved by older versions stay Japanese.
+The default language option is `auto`. A question or option label containing hiragana or katakana selects Japanese; otherwise, one containing Hangul selects Korean; otherwise, the pane and AI explanation use English. Chinese text alone selects English. Each history entry keeps the language chosen when it was created; entries saved by older versions stay Japanese.
 
 ![The same session switching to Japanese for a question asked in Japanese](docs/images/language-switch.png)
 
-Run `/config` and set qa-guide's `language` option to `en` or `ja` to choose a fixed language, or `auto` to restore automatic selection. Before any question exists, automatic selection uses Claude Code's language setting when available (Japanese selects Japanese; other languages select English), then the locale (`LC_ALL`, or `LANG` when `LC_ALL` is empty). A locale starting with `ja` selects Japanese; otherwise, the fallback is English.
+Run `/config` and set qa-guide's `language` option to `en`, `ja` or `ko` to choose a fixed language, or `auto` to restore automatic selection. Before any question exists, automatic selection uses Claude Code's language setting when available (Japanese selects Japanese, Korean selects Korean; other languages select English), then the locale (`LC_ALL`, or `LANG` when `LC_ALL` is empty). A locale starting with `ja` selects Japanese and one starting with `ko` selects Korean; otherwise, the fallback is English.
 
 | Control | Where | Action |
 | --- | --- | --- |
