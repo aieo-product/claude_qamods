@@ -9,6 +9,7 @@ export type QaQuestion = {
 
 export type QaEntry = {
   id: string
+  lang: 'en' | 'ja'
   askedAt: number
   userPrompts: string[]
   lead: string

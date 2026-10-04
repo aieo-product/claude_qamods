@@ -1,11 +1,56 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import type { ModelForkResult, On, PaneOpenArgs, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionMessage, ToolCallResult, UiScrollArgs } from 'claude-code'
+import type { ConfigRow, ModelForkResult, On, PaneOpenArgs, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionMessage, ToolCallResult, UiScrollArgs } from 'claude-code'
 
 import { openQuestionPane } from './register'
 import type { QaEntry } from '../types'
 
 const SURFACES = ['terminal', 'desktop'] as const
+
+// Word-wrapped rows drop the space at the break; rejoin Latin breaks with one.
+const joinRows = (rows: string[]) => rows.reduce((acc, row) =>
+  !acc ? row : /[\x21-\x7e]$/.test(acc) && /^[\x21-\x7e]/.test(row) ? `${acc} ${row}` : acc + row, '')
+
+const languageRow = (value: ConfigRow['value'], key = 'language'): ConfigRow => ({
+  key, label: 'Language', kind: 'text', value,
+  provider: { plugin: 'engine', tier: 'core' }, isLocked: false,
+})
+
+const DETECTION_CASES = [
+  { name: 'English', question: 'Which database?', labels: ['SQLite', 'PostgreSQL'], lang: 'en' },
+  { name: 'hiragana question', question: 'どれを選びますか？', labels: ['SQLite', 'PostgreSQL'], lang: 'ja' },
+  { name: 'katakana question', question: 'データベース?', labels: ['SQLite', 'PostgreSQL'], lang: 'ja' },
+  { name: 'hiragana option', question: 'Proceed?', labels: ['はい', 'No'], lang: 'ja' },
+  { name: 'katakana option', question: 'Which drawing?', labels: ['キャンバス', 'DOM'], lang: 'ja' },
+  { name: 'half-width kana outside the specified detection range', question: 'Which label?', labels: ['ｶﾀｶﾅ', 'ASCII'], lang: 'en' },
+  { name: 'Chinese without kana', question: '请选择数据库', labels: ['本地存储', '云存储'], lang: 'en' },
+  { name: 'kanji without kana', question: '選択肢', labels: ['保存', '取消'], lang: 'en' },
+] as const
+
+for (const { name, question, labels, lang } of DETECTION_CASES) {
+  test(`automatic language stores ${name} question language`, { options: { language: 'auto' } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, { env: { LC_ALL: lang === 'en' ? 'ja_JP.UTF-8' : 'en_US.UTF-8' } })
+    const questions: Questions = [{ question, header: 'Demo', multiSelect: false, options: labels.map(label => ({ label, description: '' })) }]
+    await ask($, questions)
+    await calls.clock.settle()
+    expect(calls.savedEntries[0]).toHaveProperty('lang', lang)
+    expect(calls.opened).toEqual([{ id: 'qa-guide', title: lang === 'ja' ? '質問ガイド' : 'Question guide' }])
+    expect(calls.languageLookups).toEqual([])
+    expect(calls.forkPrompts[0]).toContain(lang === 'ja' ? '### いまの指示（概要）' : '### Current instructions')
+  })
+}
+
+test('automatic language ignores kana in headers, descriptions, previews and conversation context', { options: { language: 'auto' } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, { messages: [
+    { role: 'user', text: 'デモを作ってください。', toolUses: [] },
+    { role: 'assistant', text: 'データベースを選びます。', toolUses: [] },
+  ] })
+  await ask($, [{ ...QUESTIONS[0]!, header: 'データベース', options: [{ label: 'SQLite', description: 'かんたん', preview: 'プレビュー' }, QUESTIONS[0]!.options[1]!] }])
+  await calls.clock.settle()
+  expect(calls.savedEntries[0]).toHaveProperty('lang', 'en')
+  expect(calls.forkPrompts[0]).toContain('### Current instructions')
+  expect(calls.languageLookups).toEqual([])
+})
 
 type Questions = Array<{
   question: string
@@ -45,6 +90,8 @@ type Calls = {
   toast: string[]
   opened: PaneOpenArgs[]
   registered: string[]
+  registeredDescriptions: string[]
+  languageLookups: string[]
   order: string[]
   clock: MockClock
 }
@@ -60,6 +107,10 @@ type EngineOptions = {
   response?: string
   messages?: SessionMessage[]
   cursor?: number
+  configRows?: ConfigRow[]
+  configThrows?: boolean
+  env?: Record<string, string | undefined>
+  envThrows?: string[]
 }
 
 const EXPLANATION = {
@@ -83,6 +134,8 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
     toast: [],
     opened: [],
     registered: [],
+    registeredDescriptions: [],
+    languageLookups: [],
     order: [],
     clock: mock.clock(on, { now: 1000 }),
   }
@@ -102,6 +155,16 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
       ? { value: { value: options.cursor, version: 1 } } as never
       : next(e),
   )
+  on('config.list', () => {
+    calls.languageLookups.push('config')
+    if (options.configThrows) throw new Error('Demo configuration is unavailable.')
+    return { value: options.configRows ?? [] }
+  })
+  on('env.get', (_$, e) => {
+    calls.languageLookups.push(e.name)
+    if (options.envThrows?.includes(e.name)) throw new Error('Demo locale is unavailable.')
+    return { value: options.env?.[e.name] }
+  })
   on('session.messages', (_$, e) => ({ value: e.agentId && options.agentMessages ? options.agentMessages : options.messages ?? [
     { role: 'user', text: 'Build a demo todo app', toolUses: [] },
     { role: 'assistant', text: 'I scaffolded the app. Next I need a database.', toolUses: [] },
@@ -118,6 +181,7 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
   })
   on('command.register', (_$, e) => {
     calls.registered.push(e.name)
+    calls.registeredDescriptions.push(e.description ?? '')
     return { value: { command: e.name } }
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -253,7 +317,7 @@ function compactTextRows(tree: unknown): Array<{ props: Record<string, unknown>;
   return (node.children ?? []).flatMap(compactTextRows)
 }
 
-test('prompt submission records only the person origins and forwards every original input unchanged', async ($, on) => {
+test('prompt submission records only the person origins and forwards every original input unchanged', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {})
   const excludedOrigins: PromptOrigin[] = [
     { kind: 'task-notification' },
@@ -294,7 +358,7 @@ test('prompt submission records only the person origins and forwards every origi
   expect(calls.savedPrompts).toEqual(inputs.map(input => input.text))
 })
 
-test('recorded prompts retain the last five and cap each at 600 characters without changing the submission', async ($, on) => {
+test('recorded prompts retain the last five and cap each at 600 characters without changing the submission', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {})
   const texts = Array.from({ length: 7 }, (_, i) => `Demo instruction ${i + 1}: ${'x'.repeat(650)}`)
   for (const text of texts) await submit($, text)
@@ -306,7 +370,7 @@ test('recorded prompts retain the last five and cap each at 600 characters witho
   for (const text of saved) expect(text.length).toBeLessThanOrEqual(600)
 })
 
-test('a failed prompt history write still forwards the person prompt unchanged', async ($, on) => {
+test('a failed prompt history write still forwards the person prompt unchanged', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {})
   let failedWrites = 0
   on('state.set', { plugin: 'qa-guide', key: 'prompts' }, () => {
@@ -324,7 +388,7 @@ test('a failed prompt history write still forwards the person prompt unchanged',
   expect(failedWrites).toBe(1)
 })
 
-test('questions snapshot the latest three recorded prompts in order and include them as quoted fork data', async ($, on) => {
+test('questions snapshot the latest three recorded prompts in order and include them as quoted fork data', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, { messages: [
     { role: 'user', text: '<task-notification>Background demo task finished.</task-notification>', toolUses: [] },
     { role: 'assistant', text: 'Now choose demo storage.', toolUses: [] },
@@ -365,7 +429,7 @@ test('questions snapshot the latest three recorded prompts in order and include 
   await calls.clock.settle()
 })
 
-test('the fork prompt requires short numbered guidance in dialog order for each question', async ($, on) => {
+test('the fork prompt requires short numbered guidance in dialog order for each question', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {})
   await ask($, NUMBERED_QUESTIONS)
   await calls.clock.settle()
@@ -393,7 +457,7 @@ test('the fork prompt requires short numbered guidance in dialog order for each 
   expect(prompt).toContain(JSON.stringify(NUMBERED_QUESTIONS, null, 1))
 })
 
-test('session fallback keeps the latest three person rows and skips XML, empty and tool result rows', async ($, on) => {
+test('session fallback keeps the latest three person rows and skips XML, empty and tool result rows', { options: { language: 'ja' } }, async ($, on) => {
   const humanTexts = ['Earlier demo task.', 'Build a demo task board.', 'Keep the interface minimal.', 'Use SQLite for the demo.']
   const calls = engineBeneath(on, {}, { messages: [
     { role: 'user', text: humanTexts[0]!, toolUses: [] },
@@ -422,7 +486,7 @@ test('session fallback keeps the latest three person rows and skips XML, empty a
   }
 })
 
-test('an open pane shows only the newest composer instruction on at most two compact lines', async ($, on) => {
+test('an open pane shows only the newest composer instruction on at most two compact lines', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 10, messages: [
     { role: 'user', text: '<task-notification>Demo task finished.</task-notification>', toolUses: [] },
   ] })
@@ -440,8 +504,8 @@ test('an open pane shows only the newest composer instruction on at most two com
     expect(instructionIndex).toBeGreaterThanOrEqual(0)
     const instructions = rows.slice(instructionIndex + 1)
     expect(instructions).toHaveLength(2)
-    expect(instructions.map(row => row.text).join('')).toContain('NEWEST_DEMO: explain the database tradeoffs.')
-    expect(instructions.map(row => row.text).join('')).toContain('Keep the answer concise.')
+    expect(joinRows(instructions.map(row => row.text))).toContain('NEWEST_DEMO: explain the database tradeoffs.')
+    expect(joinRows(instructions.map(row => row.text))).toContain('Keep the answer concise.')
     for (const row of instructions) {
       expect(row.props.wrap).toBe('truncate-end')
       expect(row.text).not.toContain('\n')
@@ -454,7 +518,7 @@ test('an open pane shows only the newest composer instruction on at most two com
   await pending
 })
 
-test('compact AI guidance strips Markdown markers, styles headings and keeps readable bullets', async ($, on) => {
+test('compact AI guidance strips Markdown markers, styles headings and keeps readable bullets', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000,
     forkDelay: 10,
@@ -498,7 +562,7 @@ test('compact AI guidance strips Markdown markers, styles headings and keeps rea
   await pending
 })
 
-test('compact numbered guidance has cyan number chips, bold labels and green recommendations on each surface', async ($, on) => {
+test('compact numbered guidance has cyan number chips, bold labels and green recommendations on each surface', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 10, forkReply: NUMBERED_EXPLANATION })
   const pending = ask($, NUMBERED_QUESTIONS)
   await calls.clock.settle()
@@ -559,7 +623,7 @@ test('compact numbered guidance has cyan number chips, bold labels and green rec
   await pending
 })
 
-test('compact spacers never displace numbered AI content when the row budget is short', async ($, on) => {
+test('compact spacers never displace numbered AI content when the row budget is short', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000,
     forkDelay: 10,
@@ -595,7 +659,7 @@ test('compact spacers never displace numbered AI content when the row budget is 
   await pending
 })
 
-test('wrapped numbered option continuations align after the chip in a narrow compact pane', async ($, on) => {
+test('wrapped numbered option continuations align after the chip in a narrow compact pane', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000,
     forkDelay: 10,
@@ -644,7 +708,7 @@ test('wrapped numbered option continuations align after the chip in a narrow com
   await pending
 })
 
-test('an open question fits 20 background-only rows with AI, the newest instruction and lead tail on each surface', async ($, on) => {
+test('an open question fits 20 background-only rows with AI, the newest instruction and lead tail on each surface', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000,
     forkDelay: 10,
@@ -715,11 +779,11 @@ test('an open question fits 20 background-only rows with AI, the newest instruct
 })
 
 for (const explainState of ['off', 'pending', 'error'] as const) {
-  test(`compact ${explainState} AI guidance gives unused rows to instruction and lead context`, async ($, on) => {
+  test(`compact ${explainState} AI guidance gives unused rows to instruction and lead context`, { options: { language: 'ja' } }, async ($, on) => {
     const calls = engineBeneath(on, {}, {
       toolDelay: 1000,
       forkDelay: explainState === 'pending' ? 2000 : 10,
-      forkReply: { isAnswered: false, reason: 'nothing-to-fork' },
+      forkReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelForkResult,
       messages: [
         { role: 'user', text: `NEWEST_CONTEXT: ${'Build the demo carefully. '.repeat(20)}`, toolUses: [] },
         { role: 'assistant', text: LONG_LEAD, toolUses: [] },
@@ -735,7 +799,7 @@ for (const explainState of ['off', 'pending', 'error'] as const) {
     if (explainState === 'error') await calls.clock.advance(10)
     for (const surface of SURFACES) {
       const ui = await mountPane($, surface, COMPACT_PROPS)
-      expect(await ui.find({ type: 'Text', text: explainState === 'off' ? /OFF/ : explainState === 'pending' ? /生成中/ : /解説を生成できませんでした: nothing-to-fork/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: explainState === 'off' ? /OFF/ : explainState === 'pending' ? /生成中/ : /解説を生成できませんでした: empty-reply/ })).toBeDefined()
       const rows = compactTextRows(await ui.drawn())
       const instructionIndex = rows.findIndex(row => row.text.includes('▍あなたの最近の指示'))
       const leadIndex = rows.findIndex(row => row.text.includes('▍直前の Claude の説明'))
@@ -755,7 +819,7 @@ for (const explainState of ['off', 'pending', 'error'] as const) {
   })
 }
 
-test('compact rows remain bounded with full-width text in a narrow pane', async ($, on) => {
+test('compact rows remain bounded with full-width text in a narrow pane', { options: { language: 'ja' } }, async ($, on) => {
   const questions: Questions = [{
     question: 'データベースの構成と移行方針をどのように決定しますか？'.repeat(4),
     header: '構成',
@@ -796,7 +860,7 @@ test('compact rows remain bounded with full-width text in a narrow pane', async 
   await pending
 })
 
-test('a taller compact pane clamps AI guidance to 65 percent and marks omitted lines', async ($, on) => {
+test('a taller compact pane clamps AI guidance to 65 percent and marks omitted lines', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000,
     forkDelay: 10,
@@ -834,7 +898,7 @@ test('a taller compact pane clamps AI guidance to 65 percent and marks omitted l
   await pending
 })
 
-test('zero, one and tiny pane row budgets drop content without overflowing', async ($, on) => {
+test('zero, one and tiny pane row budgets drop content without overflowing', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 2000 })
   const pending = ask($, COMPACT_QUESTIONS)
   await calls.clock.settle()
@@ -863,7 +927,7 @@ test('zero, one and tiny pane row budgets drop content without overflowing', asy
   await pending
 })
 
-test('cancelling the dialog restores full previews and toolbar', async ($, on) => {
+test('cancelling the dialog restores full previews and toolbar', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, 'deny')
   await ask($, COMPACT_QUESTIONS)
   for (const surface of SURFACES) {
@@ -879,7 +943,7 @@ test('cancelling the dialog restores full previews and toolbar', async ($, on) =
 
 // ui.mount exposes a drawing but does not register an engine scroll site.
 // Verify the documented scroll request and failures at the shared UI boundary.
-test('each question pane opens completely before requesting its scroll start', async () => {
+test('each question pane opens completely before requesting its scroll start', { options: { language: 'ja' } }, async () => {
   const order: string[] = []
   const opened: PaneOpenArgs[] = []
   const scrolled: UiScrollArgs[] = []
@@ -912,7 +976,7 @@ test('each question pane opens completely before requesting its scroll start', a
 })
 
 for (const failure of ['deny', 'throw'] as const) {
-  test(`a ${failure} scroll failure preserves the opened question pane result`, async () => {
+  test(`a ${failure} scroll failure preserves the opened question pane result`, { options: { language: 'ja' } }, async () => {
     const opened = { isPlaced: false, reason: 'The pane is not drawn.' } as const
     const order: string[] = []
     const scrolled: UiScrollArgs[] = []
@@ -935,7 +999,7 @@ for (const failure of ['deny', 'throw'] as const) {
   })
 }
 
-test('a question still answers when the engine has no drawn pane to scroll', async ($, on) => {
+test('a question still answers when the engine has no drawn pane to scroll', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, { isPlaced: false })
   const ran = await ask($)
   expect(calls.opened).toEqual([{ id: 'qa-guide', title: '質問ガイド' }])
@@ -947,7 +1011,7 @@ test('a question still answers when the engine has no drawn pane to scroll', asy
   }
 })
 
-test('an answered question shows context, options and the chosen answer', async ($, on) => {
+test('an answered question shows context, options and the chosen answer', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, { 'Which database should the demo app use?': 'PostgreSQL' })
   const ran = await ask($)
 
@@ -975,7 +1039,7 @@ test('an answered question shows context, options and the chosen answer', async 
   }
 })
 
-test('a dismissed question is marked cancelled', async ($, on) => {
+test('a dismissed question is marked cancelled', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, 'deny')
   await ask($)
 
@@ -986,7 +1050,7 @@ test('a dismissed question is marked cancelled', async ($, on) => {
   }
 })
 
-test('turning the AI explanation off skips the fork', async ($, on) => {
+test('turning the AI explanation off skips the fork', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' })
   const ui = await mountPane($, 'terminal')
   expect((await ui.find({ key: 'ai' }))?.props.hotkey).toBe('a')
@@ -1036,7 +1100,7 @@ async function expectNavigationUnavailable(ui: Awaited<ReturnType<typeof mountPa
   if (button) expect(button.props.disabled ?? button.props.isDisabled).toBe(true)
 }
 
-test('prev next and latest navigate selected question context and answers on each surface', async ($, on) => {
+test('prev next and latest navigate selected question context and answers on each surface', { options: { language: 'ja' } }, async ($, on) => {
   const options: EngineOptions = {}
   const calls = engineBeneath(on, NAV_ANSWERS, options)
   await fillNavigationHistory($, options)
@@ -1091,7 +1155,7 @@ test('prev next and latest navigate selected question context and answers on eac
 })
 
 for (const [cursor, index] of [[-9, 2], [99, 0]] as const) {
-  test(`a stored cursor of ${cursor} clamps to the available entry range on every render`, async ($, on) => {
+  test(`a stored cursor of ${cursor} clamps to the available entry range on every render`, { options: { language: 'ja' } }, async ($, on) => {
     const options: EngineOptions = {}
     engineBeneath(on, NAV_ANSWERS, options)
     await fillNavigationHistory($, options)
@@ -1108,10 +1172,11 @@ for (const [cursor, index] of [[-9, 2], [99, 0]] as const) {
   })
 }
 
-test('a historical open entry uses the full layout while the newest question is answered', async ($, on) => {
+test('a historical open entry uses the full layout while the newest question is answered', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, {}, { cursor: 1 })
   const history: QaEntry[] = NAV_QUESTIONS.map((questions, index) => ({
     id: `toolu_retained_${index}`,
+    lang: 'ja',
     askedAt: index + 1,
     userPrompts: [`RETAINED_INSTRUCTION_${index}: review the demo.`],
     lead: `RETAINED_LEAD_${index}: the decision background.`,
@@ -1141,7 +1206,7 @@ test('a historical open entry uses the full layout while the newest question is 
   }
 })
 
-test('a new question resets history cursor and compact context always describes the newest open entry', async ($, on) => {
+test('a new question resets history cursor and compact context always describes the newest open entry', { options: { language: 'ja' } }, async ($, on) => {
   const options: EngineOptions = {}
   const calls = engineBeneath(on, NAV_ANSWERS, options)
   await fillNavigationHistory($, options)
@@ -1181,7 +1246,7 @@ test('a new question resets history cursor and compact context always describes 
   }
 })
 
-test('history open buttons jump to each entry and mark the selected question', async ($, on) => {
+test('history open buttons jump to each entry and mark the selected question', { options: { language: 'ja' } }, async ($, on) => {
   const options: EngineOptions = {}
   const calls = engineBeneath(on, NAV_ANSWERS, options)
   await fillNavigationHistory($, options)
@@ -1209,7 +1274,7 @@ test('history open buttons jump to each entry and mark the selected question', a
   }
 })
 
-test('history lists earlier questions with their answers', async ($, on) => {
+test('history lists earlier questions with their answers', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' })
   await ask($)
   await $.tool.call({ tool: 'AskUserQuestion', tool_use_id: 'toolu_2', questions: QUESTIONS })
@@ -1225,7 +1290,7 @@ test('history lists earlier questions with their answers', async ($, on) => {
   await ui.unmount()
 })
 
-test('/qa-guide opens the pane', async ($, on) => {
+test('/qa-guide opens the pane', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {})
   await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
   expect(calls.registered).toEqual(['qa-guide'])
@@ -1240,7 +1305,7 @@ test('/qa-guide opens the pane', async ($, on) => {
   expect(calls.opened).toEqual([{ id: 'qa-guide', title: '質問ガイド' }])
 })
 
-test('a single-select label containing a comma is highlighted in full', async ($, on) => {
+test('a single-select label containing a comma is highlighted in full', { options: { language: 'ja' } }, async ($, on) => {
   const questions: Questions = [{
     question: 'Which approach should the demo use?',
     header: 'Approach',
@@ -1261,7 +1326,7 @@ test('a single-select label containing a comma is highlighted in full', async ($
   }
 })
 
-test('a freeform response is shown on the current question', async ($, on) => {
+test('a freeform response is shown on the current question', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, {}, { response: 'Use in-memory storage.' })
   await ask($)
 
@@ -1273,7 +1338,7 @@ test('a freeform response is shown on the current question', async ($, on) => {
   }
 })
 
-test('a freeform response remains visible in history', async ($, on) => {
+test('a freeform response remains visible in history', { options: { language: 'ja' } }, async ($, on) => {
   const options: EngineOptions = { response: 'Use in-memory storage.' }
   engineBeneath(on, {}, options)
   await ask($)
@@ -1290,7 +1355,7 @@ test('a freeform response remains visible in history', async ($, on) => {
   }
 })
 
-test('the AI fork starts before the question and never holds up the answer', async ($, on) => {
+test('the AI fork starts before the question and never holds up the answer', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, {
     forkDelay: 1000,
     toolDelay: 100,
@@ -1327,7 +1392,7 @@ test('the AI fork starts before the question and never holds up the answer', asy
   }
 })
 
-test('an unplaced pane offers the /qa-guide command in a toast', async ($, on) => {
+test('an unplaced pane offers the /qa-guide command in a toast', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, { isPlaced: false })
   const ran = await ask($)
 
@@ -1338,7 +1403,7 @@ test('an unplaced pane offers the /qa-guide command in a toast', async ($, on) =
   await calls.clock.settle()
 })
 
-test('multi-select question cards show previews and highlight every chosen option', async ($, on) => {
+test('multi-select question cards show previews and highlight every chosen option', { options: { language: 'ja' } }, async ($, on) => {
   const questions: Questions = [{
     question: 'Which features should the demo enable?',
     header: 'Features',
@@ -1367,7 +1432,7 @@ test('multi-select question cards show previews and highlight every chosen optio
   }
 })
 
-test('history retains the latest 20 entries including the current question', async ($, on) => {
+test('history retains the latest 20 entries including the current question', { options: { language: 'ja' } }, async ($, on) => {
   const answers: Record<string, string> = {}
   for (let i = 1; i <= 22; i += 1) answers[`History question ${String(i).padStart(2, '0')}?`] = 'SQLite'
   engineBeneath(on, answers)
@@ -1392,7 +1457,7 @@ test('history retains the latest 20 entries including the current question', asy
   }
 })
 
-test('an engine tool error is relayed and marks the question cancelled', async ($, on) => {
+test('an engine tool error is relayed and marks the question cancelled', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, {}, { toolError: true })
   const ran = await ask($)
   expect(ran).toEqual({ result: undefined, text: 'Question interrupted.', isError: true, ref: 7 })
@@ -1405,9 +1470,9 @@ test('an engine tool error is relayed and marks the question cancelled', async (
   }
 })
 
-test('an unavailable AI explanation leaves the original answer intact', async ($, on) => {
+test('an unavailable AI explanation leaves the original answer intact', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, {
-    forkReply: { isAnswered: false, reason: 'nothing-to-fork' },
+    forkReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelForkResult,
   })
   const ran = await ask($)
   expect(calls.fork).toBe(1)
@@ -1416,14 +1481,14 @@ test('an unavailable AI explanation leaves the original answer intact', async ($
   await calls.clock.settle()
   for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
-    expect(await ui.find({ type: 'Text', text: /解説を生成できませんでした: nothing-to-fork/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /解説を生成できませんでした: empty-reply/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /✔ SQLite/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /回答済み/ })).toBeDefined()
     await ui.unmount()
   }
 })
 
-test('context includes recent real user requests and the latest request following lead text', async ($, on) => {
+test('context includes recent real user requests and the latest request following lead text', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, {}, { messages: [
     { role: 'user', text: 'An unrelated earlier task.', toolUses: [] },
     { role: 'assistant', text: 'The earlier task is done.', toolUses: [] },
@@ -1448,7 +1513,7 @@ test('context includes recent real user requests and the latest request followin
   }
 })
 
-test('a question with no context and no header still draws on every surface', async ($, on) => {
+test('a question with no context and no header still draws on every surface', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, {}, { messages: [] })
   await $.tool.call({
     tool: 'AskUserQuestion',
@@ -1474,7 +1539,7 @@ test('a question with no context and no header still draws on every surface', as
   }
 })
 
-test('an entry stored before userPrompts existed still draws', async ($, on) => {
+test('an entry stored before userPrompts existed still draws', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, {})
   const legacy = {
     id: 'toolu_legacy',
@@ -1500,7 +1565,7 @@ test('an entry stored before userPrompts existed still draws', async ($, on) => 
   }
 })
 
-test('a multi-line answer stays on one line in history', async ($, on) => {
+test('a multi-line answer stays on one line in history', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, { 'Which database should the demo app use?': 'Make it readable\nand numbered' })
   await ask($)
   await $.tool.call({ tool: 'AskUserQuestion', tool_use_id: 'toolu_after', questions: QUESTIONS })
@@ -1511,7 +1576,7 @@ test('a multi-line answer stays on one line in history', async ($, on) => {
   await ui.unmount()
 })
 
-test('a question whose dispatch rejects is marked cancelled and the error propagates', async ($, on) => {
+test('a question whose dispatch rejects is marked cancelled and the error propagates', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, {}, { toolThrows: true })
   let rejected = false
   try {
@@ -1529,7 +1594,7 @@ test('a question whose dispatch rejects is marked cancelled and the error propag
   }
 })
 
-test('quoted multi-select answers containing commas are matched per label', async ($, on) => {
+test('quoted multi-select answers containing commas are matched per label', { options: { language: 'ja' } }, async ($, on) => {
   const question = {
     question: 'What matters most?',
     header: 'Priorities',
@@ -1552,7 +1617,7 @@ test('quoted multi-select answers containing commas are matched per label', asyn
   }
 })
 
-test('a subagent question reads the lead text from that agent\'s conversation', async ($, on) => {
+test('a subagent question reads the lead text from that agent\'s conversation', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, {}, {
     agentMessages: [
       { role: 'user', text: 'Investigate the storage layer', toolUses: [] },
@@ -1565,4 +1630,745 @@ test('a subagent question reads the lead text from that agent\'s conversation', 
   expect(await ui.find({ text: /The subagent found two storage options/ })).toBeDefined()
   expect(await ui.find({ text: /Next I need a database/ })).toBeUndefined()
   await ui.unmount()
+})
+
+const JAPANESE_QUESTIONS: Questions = [{ ...QUESTIONS[0]!, question: 'デモのデータベースをどれにしますか？' }]
+
+const ENGLISH_EXPLANATION: ModelForkResult = {
+  ...EXPLANATION,
+  text: [
+    '### Current instructions',
+    'Build a demo task board.',
+    'Keep setup simple and explain the choices.',
+    '### Why Claude is asking',
+    'Choose storage and drawing before implementing the board.',
+    '### Effect of each option',
+    '#### Q1. Database',
+    '1. **SQLite**: Keeps demo setup simple.',
+    '2. **PostgreSQL**: Matches production storage.',
+    '#### Q2. Drawing',
+    '1. DOM: Uses native controls.',
+    '2. Canvas: Allows flexible drawing.',
+    '### Recommendation',
+    '→ Q1: 1. SQLite: Simple demo setup.',
+    '→ Q2: 2. Canvas: Clear drawing.',
+  ].join('\n'),
+}
+
+test('language defaults to automatic detection when no option is supplied', async ($, on) => {
+  const calls = engineBeneath(on, {})
+  await ask($)
+  await calls.clock.settle()
+  expect(calls.savedEntries[0]).toHaveProperty('lang', 'en')
+  expect(calls.opened).toEqual([{ id: 'qa-guide', title: 'Question guide' }])
+})
+
+test('automatic detection includes labels in later questions', { options: { language: 'auto' } }, async ($, on) => {
+  const calls = engineBeneath(on, {})
+  await ask($, [QUESTIONS[0]!, { ...NUMBERED_QUESTIONS[1]!, options: [{ label: 'キャンバス', description: '' }, { label: 'DOM', description: '' }] }])
+  await calls.clock.settle()
+  expect(calls.savedEntries[0]).toHaveProperty('lang', 'ja')
+})
+
+for (const language of ['en', 'ja'] as const) {
+  test(`the ${language} option overrides opposite question text and bypasses fallback reads`, { options: { language } }, async ($, on) => {
+    const questions = language === 'en' ? JAPANESE_QUESTIONS : QUESTIONS
+    const calls = engineBeneath(on, {}, { configThrows: true, envThrows: ['LC_ALL', 'LANG'] })
+    await ask($, questions)
+    await calls.clock.settle()
+    expect(calls.savedEntries[0]).toHaveProperty('lang', language)
+    expect(calls.languageLookups).toEqual([])
+    expect(calls.forkPrompts[0]).toContain(language === 'en' ? '### Current instructions' : '### いまの指示（概要）')
+    expect(calls.forkPrompts[0]).toContain(JSON.stringify(questions, null, 1))
+  })
+
+  test(`the ${language} option bypasses unavailable fallback sources for an empty pane and command`, { options: { language } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, { configThrows: true, envThrows: ['LC_ALL', 'LANG'] })
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      expect((await ui.find({ key: 'ai' }))?.props.label).toBe(language === 'en' ? 'AI explanation: ON' : 'AI解説: ON')
+      expect((await ui.find({ key: 'hist' }))?.props.label).toBe(language === 'en' ? 'History (0)' : '履歴 (0)')
+      expect((await ui.find({ key: 'close' }))?.props.label).toBe(language === 'en' ? 'Close' : '閉じる')
+      expect(await ui.find({ type: 'Text', text: language === 'en' ? /No questions yet/ : /まだ質問はありません/ })).toBeDefined()
+      await ui.unmount()
+    }
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+    const ran = await $.command.run({ command: 'qa-guide', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+    expect(calls.registered).toEqual(['qa-guide'])
+    expect(language === 'en' ? /question guide/i.test(calls.registeredDescriptions[0] ?? '') : calls.registeredDescriptions[0]?.includes('質問ガイド')).toBe(true)
+    expect(language === 'en' ? /question guide/i.test(JSON.stringify(ran)) : JSON.stringify(ran).includes('質問ガイド')).toBe(true)
+    expect(calls.opened).toEqual([{ id: 'qa-guide', title: language === 'en' ? 'Question guide' : '質問ガイド' }])
+    expect(calls.languageLookups).toEqual([])
+  })
+}
+
+const FALLBACK_CASES: Array<{ name: string; options: EngineOptions; lang: 'en' | 'ja'; reads: string[] }> = [
+  { name: 'config ja before English LC_ALL', options: { configRows: [languageRow('ja')], env: { LC_ALL: 'en_US.UTF-8', LANG: 'en_US.UTF-8' } }, lang: 'ja', reads: ['config'] },
+  { name: 'config English before Japanese LC_ALL', options: { configRows: [languageRow('English')], env: { LC_ALL: 'ja_JP.UTF-8' } }, lang: 'en', reads: ['config'] },
+  { name: 'config Japanese before English LC_ALL', options: { configRows: [languageRow('Japanese')], env: { LC_ALL: 'en_US.UTF-8' } }, lang: 'ja', reads: ['config'] },
+  { name: 'config en before Japanese LANG', options: { configRows: [languageRow('en')], env: { LANG: 'ja_JP.UTF-8' } }, lang: 'en', reads: ['config'] },
+  { name: 'only the exact config language key', options: { configRows: [languageRow('ja', 'qa-guide.language'), languageRow('ja', 'languagePreference')], env: { LC_ALL: 'en_US.UTF-8' } }, lang: 'en', reads: ['config', 'LC_ALL'] },
+  { name: 'a non-string config row is ignored', options: { configRows: [languageRow(false)], env: { LC_ALL: 'ja_JP.UTF-8' } }, lang: 'ja', reads: ['config', 'LC_ALL'] },
+  { name: 'Japanese LC_ALL before English LANG', options: { env: { LC_ALL: 'ja_JP.UTF-8', LANG: 'en_US.UTF-8' } }, lang: 'ja', reads: ['config', 'LC_ALL'] },
+  { name: 'English LC_ALL before Japanese LANG', options: { env: { LC_ALL: 'en_US.UTF-8', LANG: 'ja_JP.UTF-8' } }, lang: 'en', reads: ['config', 'LC_ALL'] },
+  { name: 'Japanese LANG when LC_ALL is absent', options: { env: { LANG: 'ja_JP.UTF-8' } }, lang: 'ja', reads: ['config', 'LC_ALL', 'LANG'] },
+  { name: 'Japanese LANG when LC_ALL is empty', options: { env: { LC_ALL: '', LANG: 'ja_JP.UTF-8' } }, lang: 'ja', reads: ['config', 'LC_ALL', 'LANG'] },
+  { name: 'English when no fallback value exists', options: {}, lang: 'en', reads: ['config', 'LC_ALL', 'LANG'] },
+  { name: 'config errors fall through to LC_ALL', options: { configThrows: true, env: { LC_ALL: 'ja_JP.UTF-8' } }, lang: 'ja', reads: ['config', 'LC_ALL'] },
+  { name: 'LC_ALL errors fall through to LANG', options: { envThrows: ['LC_ALL'], env: { LANG: 'ja_JP.UTF-8' } }, lang: 'ja', reads: ['config', 'LC_ALL', 'LANG'] },
+  { name: 'all fallback errors use English', options: { configThrows: true, envThrows: ['LC_ALL', 'LANG'] }, lang: 'en', reads: ['config', 'LC_ALL', 'LANG'] },
+]
+
+for (const { name, options, lang, reads } of FALLBACK_CASES) {
+  test(`no-question automatic language uses ${name}`, { options: { language: 'auto' } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, options)
+    for (const surface of SURFACES) {
+      calls.languageLookups.length = 0
+      const ui = await mountPane($, surface)
+      expect((await ui.find({ key: 'ai' }))?.props.label).toBe(lang === 'ja' ? 'AI解説: ON' : 'AI explanation: ON')
+      expect(calls.languageLookups).toEqual(reads)
+      await ui.unmount()
+    }
+    calls.languageLookups.length = 0
+    await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+    expect(lang === 'ja' ? calls.registeredDescriptions[0]?.includes('質問ガイド') : /question guide/i.test(calls.registeredDescriptions[0] ?? '')).toBe(true)
+    expect(calls.languageLookups).toEqual(reads)
+    calls.languageLookups.length = 0
+    await $.command.run({ command: 'qa-guide', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+    expect(calls.opened).toEqual([{ id: 'qa-guide', title: lang === 'ja' ? '質問ガイド' : 'Question guide' }])
+    expect(calls.languageLookups).toEqual(reads)
+  })
+}
+
+test('an empty question list uses fallback and stores its language', { options: { language: 'auto' } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, { configRows: [languageRow('ja')] })
+  await ask($, [])
+  await calls.clock.settle()
+  expect(calls.savedEntries[0]).toHaveProperty('lang', 'ja')
+  expect(calls.opened).toEqual([{ id: 'qa-guide', title: '質問ガイド' }])
+  expect(calls.languageLookups).toEqual(['config'])
+})
+
+test('English fork guidance preserves four ordered sections and dialog numbering for multiple questions', { options: { language: 'en' } }, async ($, on) => {
+  const calls = engineBeneath(on, {})
+  await submit($, 'Keep demo storage local.')
+  await ask($, NUMBERED_QUESTIONS)
+  await calls.clock.settle()
+  const prompt = calls.forkPrompts[0] ?? ''
+  const headings = ['### Current instructions', '### Why Claude is asking', '### Effect of each option', '### Recommendation']
+  for (const [i, heading] of headings.entries()) {
+    expect(prompt).toContain(heading)
+    if (i > 0) expect(prompt.indexOf(headings[i - 1]!)).toBeLessThan(prompt.indexOf(heading))
+  }
+  const sections = headings.map((heading, i) => prompt.slice(prompt.indexOf(heading), i + 1 < headings.length ? prompt.indexOf(headings[i + 1]!) : undefined))
+  expect(/2\s*[-–]\s*3\s*lines/i.test(sections[0]!)).toBe(true)
+  expect(/1\s*[-–]\s*2\s*(?:short\s*)?lines/i.test(sections[1]!)).toBe(true)
+  expect(sections[2]).toContain('1. <label>: <effect>')
+  expect(/dialog.*order|order.*dialog/i.test(sections[2]!)).toBe(true)
+  expect(sections[2]).toContain('#### Q<n>.')
+  expect(/restart.*1|start.*1|1.*restart/i.test(sections[2]!)).toBe(true)
+  expect(sections[2]).toContain('one line')
+  expect(sections[2]).toContain('one sentence')
+  expect(/(?:not|never|no).*Other|Other.*(?:not|never|no)/i.test(sections[2]!)).toBe(true)
+  expect(sections[3]).toContain('→ 2. <label>: <reason>')
+  expect(sections[3]).toContain('→ Q1: 2. <label>')
+  for (const forbidden of ['long paragraphs', 'tables', 'code blocks']) expect(prompt.toLowerCase()).toContain(forbidden)
+  expect(prompt).toContain(JSON.stringify(NUMBERED_QUESTIONS, null, 1))
+  expect(prompt).toContain(JSON.stringify(['Keep demo storage local.'], null, 1))
+  expect(prompt).not.toContain('### いまの指示（概要）')
+})
+
+test('English compact guidance renders translated badges, context and numbered AI sections on every surface', { options: { language: 'en' } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 10, forkReply: ENGLISH_EXPLANATION })
+  const pending = ask($, NUMBERED_QUESTIONS)
+  await calls.clock.settle()
+  await calls.clock.advance(10)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect((await ui.find({ type: 'Text', text: /^ Awaiting answer $/ }))?.props.backgroundColor).toBe('yellow')
+    expect(await ui.find({ type: 'Text', text: /^ Question context $/ })).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^\(After answering, use p\/n for past questions\)$/ }))?.props.dimColor).toBe(true)
+    for (const heading of ['▍Your recent instructions', "▍Claude's preceding explanation"]) {
+      expect((await ui.find({ type: 'Text', text: new RegExp(`^${heading}$`) }))?.props.color).toBe('blue')
+    }
+    const chips = await ui.findAll({ type: 'Text', text: /^\s*[12]\s*$/ })
+    expect(chips.map(chip => chip.text.trim())).toEqual(['1', '2', '1', '2'])
+    for (const chip of chips) {
+      expect(chip.props.bold).toBe(true)
+      expect(chip.props.color).toBe('cyan')
+    }
+    for (const label of ['SQLite', 'PostgreSQL', 'DOM', 'Canvas']) {
+      expect((await ui.find({ type: 'Text', text: new RegExp(`^\\s*${label}:?\\s*$`) }))?.props.bold).toBe(true)
+    }
+    const rows = compactTextRows(await ui.find({ key: 'compact-ai' }))
+    expect(rows[0]?.text).toBe('✦ AI explanation: Current instructions')
+    for (const heading of ['Current instructions', 'Why Claude is asking', 'Effect of each option', 'Q1. Database', 'Q2. Drawing', 'Recommendation']) {
+      const row = rows.find(row => row.text.includes(heading))
+      expect(row?.props.bold).toBe(true)
+      expect(row?.props.color).toBe('magenta')
+    }
+    for (const recommendation of ['→ Q1: 1. SQLite: Simple demo setup.', '→ Q2: 2. Canvas: Clear drawing.']) {
+      const row = rows.find(row => row.text === recommendation)
+      expect(row?.props.bold).toBe(true)
+      expect(row?.props.color).toBe('green')
+    }
+    for (const row of rows) {
+      expect(row.text).not.toContain('###')
+      expect(row.text).not.toContain('**')
+      expect(row.props.wrap).toBe('truncate-end')
+    }
+    expect(compactTextRows(await ui.drawn()).length).toBeLessThanOrEqual(PANE_PROPS.scroll!.bodyRows)
+    expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
+    expect(await ui.findAll({ type: 'Markdown' })).toHaveLength(0)
+    expect(await ui.find({ text: /回答待ち|質問の背景|あなたの最近の指示|直前の Claude の説明|AI解説/ })).toBeUndefined()
+    await ui.unmount()
+  }
+  await calls.clock.advance(990)
+  await pending
+  expect(calls.savedEntries[0]).toHaveProperty('lang', 'en')
+})
+
+test('English full guidance renders translated sections, answer badges and history toolbars on every surface', { options: { language: 'en' } }, async ($, on) => {
+  const calls = engineBeneath(on, { 'Which database should the demo app use?': 'PostgreSQL', 'How should the demo draw its board?': 'Canvas' }, { forkReply: ENGLISH_EXPLANATION })
+  await ask($, NUMBERED_QUESTIONS)
+  await ask($, NUMBERED_QUESTIONS, 'toolu_english_second')
+  await calls.clock.settle()
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect((await ui.find({ type: 'Text', text: /^ Answered $/ }))?.props.backgroundColor).toBe('green')
+    expect(await ui.find({ type: 'Text', text: /^Questions from Claude \(2\)$/ })).toBeDefined()
+    for (const heading of ['▍Your recent instructions', "▍Claude's preceding explanation", '✦ AI explanation (instructions, context, effects, recommendation)']) {
+      expect(await ui.find({ type: 'Text', text: new RegExp(`^${heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`) })).toBeDefined()
+    }
+    expect((await ui.find({ key: 'ai' }))?.props.label).toBe('AI explanation: ON')
+    expect((await ui.find({ key: 'hist' }))?.props.label).toBe('History (2)')
+    expect((await ui.find({ key: 'close' }))?.props.label).toBe('Close')
+    expect((await ui.find({ key: 'prev' }))?.props.label).toBe('◀ Previous')
+    expect(await ui.find({ type: 'Text', text: /^Q1\. Which database should the demo app use\?$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Q2\. How should the demo draw its board\?$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^1\. SQLite$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^1\. DOM$/ })).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^✔ PostgreSQL$/ }))?.props.color).toBe('green')
+    expect((await ui.find({ type: 'Text', text: /^✔ Canvas$/ }))?.props.color).toBe('green')
+    expect(await ui.find({ type: 'Markdown', text: /^### Current instructions/ })).toBeDefined()
+    await ui.press({ key: 'prev' })
+    expect((await ui.find({ key: 'next' }))?.props.label).toBe('Next ▶')
+    expect((await ui.find({ key: 'latest' }))?.props.label).toBe('Latest')
+    await ui.press({ key: 'latest' })
+    await ui.press({ key: 'hist' })
+    expect((await ui.find({ key: 'hist' }))?.props.label).toBe('Hide history')
+    expect(await ui.find({ type: 'Text', text: /^Past questions and answers$/ })).toBeDefined()
+    expect((await ui.find({ key: 'open-0' }))?.props.label).toBe('1/2 ▶ Selected')
+    expect((await ui.find({ key: 'open-1' }))?.props.label).toBe('2/2 Open')
+    expect(await ui.find({ text: /回答済み|Claude からの質問|AI解説|過去の質問と回答|選択中|あなたの最近の指示/ })).toBeUndefined()
+    await ui.press({ key: 'hist' })
+    await ui.unmount()
+  }
+})
+
+test('English cancellation and unavailable AI explanation keep translated status and errors', { options: { language: 'en' } }, async ($, on) => {
+  const calls = engineBeneath(on, 'deny', { forkReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelForkResult })
+  await ask($)
+  await calls.clock.settle()
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect((await ui.find({ type: 'Text', text: /^ Cancelled $/ }))?.props.backgroundColor).toBe('gray')
+    expect(await ui.find({ type: 'Text', text: /^Could not generate an explanation: empty-reply$/ })).toBeDefined()
+    expect((await ui.find({ key: 'ai' }))?.props.label).toBe('AI explanation: ON')
+    expect(await ui.find({ text: /キャンセル|解説を生成できませんでした/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('English placement toast uses the question language instead of Japanese fallback settings', { options: { language: 'auto' } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, { isPlaced: false, configRows: [languageRow('ja')], env: { LANG: 'ja_JP.UTF-8' } })
+  await ask($)
+  await calls.clock.settle()
+  expect(calls.opened).toEqual([{ id: 'qa-guide', title: 'Question guide' }])
+  expect(calls.toast).toEqual(['Question guide: use /qa-guide to view context and option details'])
+  expect(calls.languageLookups).toEqual([])
+})
+
+test('legacy entries without lang retain Japanese UI even under an English override', { options: { language: 'en' } }, async ($, on) => {
+  engineBeneath(on, {})
+  const legacy = {
+    id: 'toolu_legacy_language', askedAt: 1, userPrompts: ['Legacy demo request.'], lead: 'Legacy background.',
+    questions: QUESTIONS, explainState: 'off', explanation: '', status: 'answered',
+    answers: { 'Which database should the demo app use?': 'SQLite' },
+  }
+  on('state.get', { plugin: 'qa-guide', key: 'entries' }, () => ({ value: { value: [legacy], version: 1 } }) as never)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: /^ 回答済み $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▍あなたの最近の指示$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▍直前の Claude の説明$/ })).toBeDefined()
+    expect((await ui.find({ key: 'ai' }))?.props.label).toBe('AI解説: ON')
+    expect((await ui.find({ key: 'hist' }))?.props.label).toBe('履歴 (1)')
+    expect((await ui.find({ key: 'close' }))?.props.label).toBe('閉じる')
+    expect(await ui.find({ type: 'Text', text: /^ Answered $/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('bilingual history retains each entry language after explanation updates and fallback settings change', { options: { language: 'auto' } }, async ($, on) => {
+  const options: EngineOptions = { forkReply: { ...EXPLANATION, text: 'Japanese guidance.' }, forkDelay: 10 }
+  const calls = engineBeneath(on, 'deny', options)
+  await ask($, JAPANESE_QUESTIONS, 'toolu_bilingual_ja')
+  options.forkReply = ENGLISH_EXPLANATION
+  await ask($, QUESTIONS, 'toolu_bilingual_en')
+  await calls.clock.advance(10)
+  expect(calls.savedEntries[0]).toHaveProperty('lang', 'ja')
+  expect(calls.savedEntries[1]).toHaveProperty('lang', 'en')
+  expect(calls.savedEntries.map(entry => entry.explainState)).toEqual(['done', 'done'])
+  options.configRows = [languageRow('ja')]
+  options.env = { LC_ALL: 'ja_JP.UTF-8' }
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: /^ Cancelled $/ })).toBeDefined()
+    expect((await ui.find({ key: 'ai' }))?.props.label).toBe('AI explanation: ON')
+    await ui.press({ key: 'hist' })
+    expect((await ui.find({ key: 'open-0' }))?.props.label).toBe('1/2 ▶ Selected')
+    expect((await ui.find({ key: 'open-1' }))?.props.label).toBe('2/2 開く')
+    expect(await ui.find({ type: 'Text', text: /^  → Cancelled$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^  → キャンセル$/ })).toBeDefined()
+    await ui.press({ key: 'open-1' })
+    expect(await ui.find({ type: 'Text', text: /^ キャンセル $/ })).toBeDefined()
+    expect((await ui.find({ key: 'ai' }))?.props.label).toBe('AI解説: ON')
+    expect((await ui.find({ key: 'next' }))?.props.label).toBe('次 ▶')
+    expect((await ui.find({ key: 'latest' }))?.props.label).toBe('最新')
+    expect((await ui.find({ key: 'open-1' }))?.props.label).toBe('2/2 ▶ 選択中')
+    expect((await ui.find({ key: 'open-0' }))?.props.label).toBe('1/2 Open')
+    await ui.press({ key: 'latest' })
+    expect(await ui.find({ type: 'Text', text: /^ Cancelled $/ })).toBeDefined()
+    expect((await ui.find({ key: 'ai' }))?.props.label).toBe('AI explanation: ON')
+    await ui.press({ key: 'hist' })
+    await ui.unmount()
+  }
+  expect(calls.languageLookups).toEqual([])
+})
+
+const SHORT_ENGLISH_EXPLANATION: ModelForkResult = {
+  ...EXPLANATION,
+  text: [
+    '### Current instructions', 'Build a small demo board.',
+    '### Why Claude is asking', 'Choose storage before saving tasks.',
+    '### Effect of each option', '1. SQLite: Keeps setup simple.', '2. PostgreSQL: Matches production.',
+    '### Recommendation', '→ 1. SQLite: Simple demo setup.',
+  ].join('\n'),
+}
+
+for (const state of ['off', 'error'] as const) {
+  test(`English ${state} guidance translates both compact and full state messages`, async ($, on) => {
+    const calls = engineBeneath(on, {}, {
+      toolDelay: 1000, forkDelay: 10,
+      forkReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelForkResult,
+    })
+    if (state === 'off') {
+      const ui = await mountPane($, 'terminal')
+      await ui.press({ key: 'ai' })
+      await ui.unmount()
+    }
+    const pending = ask($)
+    await calls.clock.settle()
+    await calls.clock.advance(10)
+    const compactMessage = state === 'off'
+      ? '✦ AI explanation: OFF (enable for the next question with [a] after answering)'
+      : '✦ AI explanation: Could not generate an explanation: empty-reply'
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface, { ...PANE_PROPS, bodyColumns: 100 })
+      expect((await ui.findAll({ type: 'Text' })).some(node => node.text === compactMessage)).toBe(true)
+      expect(await ui.find({ text: /解説を生成できませんでした|回答後に/ })).toBeUndefined()
+      await ui.unmount()
+    }
+    await calls.clock.advance(990)
+    await pending
+    const fullMessage = state === 'off'
+      ? 'OFF (enable for the next question with [a])'
+      : 'Could not generate an explanation: empty-reply'
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      expect((await ui.findAll({ type: 'Text' })).some(node => node.text === fullMessage)).toBe(true)
+      expect((await ui.find({ key: 'ai' }))?.props.label).toBe(state === 'off' ? 'AI explanation: OFF' : 'AI explanation: ON')
+      await ui.unmount()
+    }
+    expect(calls.fork).toBe(state === 'off' ? 0 : 1)
+  })
+}
+
+for (const [name, questions, lang] of [
+  ['English question', QUESTIONS, 'en'],
+  ['hiragana in the question', [{ ...QUESTIONS[0]!, question: 'どちらを使いますか？' }], 'ja'],
+  ['katakana in the question', [{ ...QUESTIONS[0]!, question: 'データベース?' }], 'ja'],
+  ['hiragana in an option label', [{ ...QUESTIONS[0]!, options: [{ label: 'そのまま', description: 'Keep the demo simple.' }] }], 'ja'],
+  ['katakana in an option label', [{ ...QUESTIONS[0]!, options: [{ label: 'ローカル', description: 'Keep the demo local.' }] }], 'ja'],
+  ['half-width katakana outside the detection range', [{ ...QUESTIONS[0]!, options: [{ label: 'ﾛｰｶﾙ', description: 'Keep the demo local.' }] }], 'en'],
+  ['Chinese question and option labels', [{ ...QUESTIONS[0]!, question: '演示应用应使用哪种数据库？', options: [{ label: '本地存储', description: '简单设置' }] }], 'en'],
+  ['Japanese only in descriptions, previews, headers and conversation', [{ ...QUESTIONS[0]!, header: 'データベース', options: [{ label: 'SQLite', description: 'ローカルに保存します。', preview: 'デモ用プレビュー' }] }], 'en'],
+] satisfies Array<[string, Questions, 'en' | 'ja']>) {
+  test(`automatic language detection uses ${lang} for ${name}`, async ($, on) => {
+    const calls = engineBeneath(on, {}, {
+      configRows: [languageRow(lang === 'en' ? 'ja' : 'en')],
+      env: { LC_ALL: lang === 'en' ? 'ja_JP.UTF-8' : 'en_US.UTF-8' },
+      messages: [{ role: 'user', text: 'デモを作ってください。', toolUses: [] }, { role: 'assistant', text: 'データベースを選びましょう。', toolUses: [] }],
+    })
+    await submit($, '最近の指示は日本語です。')
+    await ask($, questions)
+    await calls.clock.settle()
+    expect(calls.savedEntries[0]?.lang).toBe(lang)
+    expect(calls.opened).toEqual([{ id: 'qa-guide', title: lang === 'en' ? 'Question guide' : '質問ガイド' }])
+    expect(calls.languageLookups).toEqual([])
+    expect(calls.forkPrompts[0]).toContain(lang === 'en' ? '### Current instructions' : '### いまの指示（概要）')
+  })
+}
+
+test('the English user configuration overrides Japanese questions and all fallback sources', { options: { language: 'en' } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, { configRows: [languageRow('ja')], env: { LC_ALL: 'ja_JP.UTF-8', LANG: 'ja_JP.UTF-8' } })
+  const empty = await mountPane($, 'terminal')
+  expect((await empty.find({ key: 'ai' }))?.props.label).toBe('AI explanation: ON')
+  await empty.unmount()
+  await ask($, JAPANESE_QUESTIONS)
+  await calls.clock.settle()
+  expect(calls.savedEntries[0]?.lang).toBe('en')
+  expect(calls.forkPrompts[0]).toContain('### Current instructions')
+  expect(calls.languageLookups).toEqual([])
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: /^ Answered $/ })).toBeDefined()
+    expect((await ui.find({ key: 'close' }))?.props.label).toBe('Close')
+    await ui.unmount()
+  }
+})
+
+test('the Japanese user configuration overrides English questions and all fallback sources', { options: { language: 'ja' } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, { configRows: [languageRow('en')], env: { LC_ALL: 'en_US.UTF-8', LANG: 'en_US.UTF-8' } })
+  const empty = await mountPane($, 'terminal')
+  expect((await empty.find({ key: 'ai' }))?.props.label).toBe('AI解説: ON')
+  await empty.unmount()
+  await ask($)
+  await calls.clock.settle()
+  expect(calls.savedEntries[0]?.lang).toBe('ja')
+  expect(calls.forkPrompts[0]).toContain('### いまの指示（概要）')
+  expect(calls.languageLookups).toEqual([])
+})
+
+for (const [name, options, lang, reads] of [
+  ['Japanese config before English locale', { configRows: [languageRow('ja')], env: { LC_ALL: 'en_US.UTF-8' } }, 'ja', ['config']],
+  ['English config before Japanese locale', { configRows: [languageRow('en')], env: { LC_ALL: 'ja_JP.UTF-8' } }, 'en', ['config']],
+  ['Japanese config name', { configRows: [languageRow('Japanese')], env: { LANG: 'en_US.UTF-8' } }, 'ja', ['config']],
+  ['English config name', { configRows: [languageRow('English')], env: { LANG: 'ja_JP.UTF-8' } }, 'en', ['config']],
+  ['Japanese config locale', { configRows: [languageRow('ja-JP')], env: { LANG: 'en_US.UTF-8' } }, 'ja', ['config']],
+  ['English config locale', { configRows: [languageRow('en-US')], env: { LANG: 'ja_JP.UTF-8' } }, 'en', ['config']],
+  ['Japanese LC_ALL before English LANG', { env: { LC_ALL: 'ja_JP.UTF-8', LANG: 'en_US.UTF-8' } }, 'ja', ['config', 'LC_ALL']],
+  ['English LC_ALL before Japanese LANG', { env: { LC_ALL: 'en_US.UTF-8', LANG: 'ja_JP.UTF-8' } }, 'en', ['config', 'LC_ALL']],
+  ['Japanese LANG without LC_ALL', { env: { LANG: 'ja_JP.UTF-8' } }, 'ja', ['config', 'LC_ALL', 'LANG']],
+  ['Japanese LANG with empty LC_ALL', { env: { LC_ALL: '', LANG: 'ja_JP.UTF-8' } }, 'ja', ['config', 'LC_ALL', 'LANG']],
+  ['case insensitive Japanese locale', { env: { LANG: 'JA_JP.UTF-8' } }, 'ja', ['config', 'LC_ALL', 'LANG']],
+  ['English default without language sources', {}, 'en', ['config', 'LC_ALL', 'LANG']],
+  ['other concrete config languages select English before locale', { configRows: [languageRow('French')], env: { LANG: 'ja_JP.UTF-8' } }, 'en', ['config']],
+  ['empty config language falls back to locale', { configRows: [languageRow('')], env: { LANG: 'ja_JP.UTF-8' } }, 'ja', ['config', 'LC_ALL', 'LANG']],
+  ['automatic config language falls back to locale', { configRows: [languageRow('auto')], env: { LANG: 'ja_JP.UTF-8' } }, 'ja', ['config', 'LC_ALL', 'LANG']],
+  ['non-string config value falls back to locale', { configRows: [languageRow(true)], env: { LC_ALL: 'ja_JP.UTF-8' } }, 'ja', ['config', 'LC_ALL']],
+  ['only exact language keys match', { configRows: [{ ...languageRow('ja', 'theme'), label: 'language' }, languageRow('ja', 'qa-guide.language')], env: { LANG: 'en_US.UTF-8' } }, 'en', ['config', 'LC_ALL', 'LANG']],
+  ['config errors are ignored', { configThrows: true, env: { LC_ALL: 'ja_JP.UTF-8' } }, 'ja', ['config', 'LC_ALL']],
+  ['LC_ALL errors allow LANG fallback', { envThrows: ['LC_ALL'], env: { LANG: 'ja_JP.UTF-8' } }, 'ja', ['config', 'LC_ALL', 'LANG']],
+  ['all locale errors use English', { configThrows: true, envThrows: ['LC_ALL', 'LANG'] }, 'en', ['config', 'LC_ALL', 'LANG']],
+] satisfies Array<[string, EngineOptions, 'en' | 'ja', string[]]>) {
+  test(`an empty pane resolves ${lang} from ${name}`, async ($, on) => {
+    const calls = engineBeneath(on, {}, options)
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      expect((await ui.find({ key: 'ai' }))?.props.label).toBe(lang === 'en' ? 'AI explanation: ON' : 'AI解説: ON')
+      expect((await ui.find({ key: 'hist' }))?.props.label).toBe(lang === 'en' ? 'History (0)' : '履歴 (0)')
+      expect((await ui.find({ key: 'close' }))?.props.label).toBe(lang === 'en' ? 'Close' : '閉じる')
+      await ui.unmount()
+    }
+    expect(calls.languageLookups.slice(0, reads.length)).toEqual(reads)
+    if (!reads.includes('LC_ALL')) expect(calls.languageLookups).not.toContain('LC_ALL')
+    if (!reads.includes('LANG')) expect(calls.languageLookups).not.toContain('LANG')
+  })
+}
+
+test('command descriptions and empty command results use the no-question language fallback', async ($, on) => {
+  const calls = engineBeneath(on, {}, { configRows: [languageRow('en')], env: { LANG: 'ja_JP.UTF-8' } })
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  expect(calls.registeredDescriptions).toEqual(["Open the question guide pane (context, options, and AI explanation for Claude's questions)"])
+  const ran = await $.command.run({ command: 'qa-guide', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } })
+  expect(ran).toEqual({ text: 'Opened the question guide.' })
+  expect(calls.opened).toEqual([{ id: 'qa-guide', title: 'Question guide' }])
+  expect(calls.languageLookups).not.toContain('LANG')
+})
+
+test('command descriptions honor Japanese locale fallback before any entry exists', async ($, on) => {
+  const calls = engineBeneath(on, {}, { env: { LANG: 'ja_JP.UTF-8' } })
+  await $.session.start({ cwd: '.', surface: 'terminal', isInteractive: true })
+  expect(calls.registeredDescriptions).toEqual(['質問ガイドペインを開く（Claudeの質問の背景・選択肢・AI解説）'])
+})
+
+test('legacy entries without lang render Japanese labels even with an English override', { options: { language: 'en' } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, { env: { LANG: 'en_US.UTF-8' } })
+  const legacy = { id: 'toolu_legacy_language', askedAt: 1, userPrompts: ['Build a demo board.'], lead: 'Choose the storage next.', questions: QUESTIONS, explainState: 'off', explanation: '', status: 'answered', answers: {} }
+  on('state.get', { plugin: 'qa-guide', key: 'entries' }, () => ({ value: { value: [legacy], version: 1 } }) as never)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: /^ 回答済み $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Claude からの質問 \(1件\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▍あなたの最近の指示$/ })).toBeDefined()
+    expect((await ui.find({ key: 'ai' }))?.props.label).toBe('AI解説: ON')
+    expect((await ui.find({ key: 'hist' }))?.props.label).toBe('履歴 (1)')
+    expect((await ui.find({ key: 'close' }))?.props.label).toBe('閉じる')
+    expect(await ui.find({ text: /^ Answered $/ })).toBeUndefined()
+    await ui.unmount()
+  }
+  expect(calls.languageLookups).toEqual([])
+})
+
+test('mixed-language entries retain their original language while browsing on both surfaces', async ($, on) => {
+  const calls = engineBeneath(on, {})
+  await ask($, JAPANESE_QUESTIONS, 'toolu_language_ja')
+  await ask($, QUESTIONS, 'toolu_language_en')
+  await calls.clock.settle()
+  expect(calls.savedEntries.map(entry => entry.lang)).toEqual(['ja', 'en'])
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: /^ Answered $/ })).toBeDefined()
+    expect((await ui.find({ key: 'prev' }))?.props.label).toBe('◀ Previous')
+    expect((await ui.find({ key: 'hist' }))?.props.label).toBe('History (2)')
+    await ui.press({ key: 'prev' })
+    expect(await ui.find({ type: 'Text', text: /^ 回答済み $/ })).toBeDefined()
+    expect((await ui.find({ key: 'next' }))?.props.label).toBe('次 ▶')
+    expect((await ui.find({ key: 'latest' }))?.props.label).toBe('最新')
+    expect((await ui.find({ key: 'hist' }))?.props.label).toBe('履歴 (2)')
+    await ui.press({ key: 'latest' })
+    expect(await ui.find({ type: 'Text', text: /^ Answered $/ })).toBeDefined()
+    expect((await ui.find({ key: 'close' }))?.props.label).toBe('Close')
+    await ui.unmount()
+  }
+  expect(calls.savedEntries.map(entry => entry.lang)).toEqual(['ja', 'en'])
+})
+
+test('English compact panes show translated badges, context titles, hints and AI headings on both surfaces', async ($, on) => {
+  const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 10, forkReply: SHORT_ENGLISH_EXPLANATION })
+  const pending = ask($)
+  await calls.clock.settle()
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface, { ...PANE_PROPS, bodyColumns: 80 })
+    expect((await ui.find({ type: 'Text', text: /^ Awaiting answer $/ }))?.props.backgroundColor).toBe('yellow')
+    expect(await ui.find({ type: 'Text', text: /Question context/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /After answering, use p\/n for past questions/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^✦ AI explanation: Generating… \(you can keep answering\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▍Your recent instructions$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▍Claude's preceding explanation$/ })).toBeDefined()
+    expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
+    await ui.unmount()
+  }
+  await calls.clock.advance(10)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface, { ...PANE_PROPS, bodyColumns: 80 })
+    for (const heading of ['✦ AI explanation: Current instructions', 'Why Claude is asking', 'Effect of each option', 'Recommendation']) {
+      expect((await ui.find({ type: 'Text', text: new RegExp(`^${heading}$`) }))?.props.bold).toBe(true)
+    }
+    expect(await ui.find({ type: 'Text', text: /^ 1 SQLite: Keeps setup simple\.$/ })).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^→ 1\. SQLite: Simple demo setup\.$/ }))?.props.color).toBe('green')
+    expect(await ui.find({ text: /回答待ち|質問の背景|あなたの最近の指示|生成中/ })).toBeUndefined()
+    await ui.unmount()
+  }
+  await calls.clock.advance(990)
+  await pending
+})
+
+test('English pending guidance retains its complete text when wrapping in narrow compact panes', { options: { language: 'en' } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, { toolDelay: 1000, forkDelay: 2000 })
+  const pending = ask($)
+  await calls.clock.settle()
+  for (const bodyColumns of [40, 60]) {
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface, { ...COMPACT_PROPS, bodyColumns })
+      const aiRows = compactTextRows(await ui.find({ key: 'compact-ai' }))
+      expect(joinRows(aiRows.map(row => row.text))).toBe('✦ AI explanation: Generating… (you can keep answering)')
+      if (bodyColumns === 40) expect(aiRows).toHaveLength(2)
+      for (const row of aiRows) expect([...row.text].length).toBeLessThanOrEqual(bodyColumns)
+      for (const row of compactTextRows(await ui.drawn())) {
+        expect(row.props.wrap).toBe('truncate-end')
+        expect(row.text).not.toContain('\n')
+      }
+      expect(compactTextRows(await ui.drawn()).length).toBeLessThanOrEqual(20)
+      expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
+      expect(await ui.findAll({ type: 'Markdown' })).toHaveLength(0)
+      await ui.unmount()
+    }
+  }
+  await calls.clock.advance(2000)
+  await pending
+})
+
+test('English full panes translate section titles, all toolbar labels and history on both surfaces', async ($, on) => {
+  const calls = engineBeneath(on, {}, { forkReply: SHORT_ENGLISH_EXPLANATION })
+  for (let i = 0; i < 3; i++) await ask($, QUESTIONS, `toolu_english_full_${i}`)
+  await calls.clock.settle()
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect((await ui.find({ type: 'Text', text: /^ Answered $/ }))?.props.backgroundColor).toBe('green')
+    expect(await ui.find({ type: 'Text', text: /^Questions from Claude \(1\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▍Your recent instructions$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^▍Claude's preceding explanation$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^✦ AI explanation \(instructions, context, effects, recommendation\)$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Markdown', text: /### Current instructions/ })).toBeDefined()
+    expect((await ui.find({ key: 'prev' }))?.props.label).toBe('◀ Previous')
+    expect((await ui.find({ key: 'ai' }))?.props.label).toBe('AI explanation: ON')
+    expect((await ui.find({ key: 'hist' }))?.props.label).toBe('History (3)')
+    expect((await ui.find({ key: 'close' }))?.props.label).toBe('Close')
+    await ui.press({ key: 'prev' })
+    expect((await ui.find({ key: 'next' }))?.props.label).toBe('Next ▶')
+    expect((await ui.find({ key: 'latest' }))?.props.label).toBe('Latest')
+    await ui.press({ key: 'ai' })
+    expect((await ui.find({ key: 'ai' }))?.props.label).toBe('AI explanation: OFF')
+    await ui.press({ key: 'ai' })
+    await ui.press({ key: 'hist' })
+    expect((await ui.find({ key: 'hist' }))?.props.label).toBe('Hide history')
+    expect(await ui.find({ type: 'Text', text: /^Past questions and answers$/ })).toBeDefined()
+    expect((await ui.find({ key: 'open-1' }))?.props.label).toBe('2/3 ▶ Selected')
+    expect((await ui.find({ key: 'open-0' }))?.props.label).toBe('1/3 Open')
+    expect(await ui.find({ type: 'Text', text: /Unanswered/ })).toBeDefined()
+    await ui.press({ key: 'hist' })
+    await ui.press({ key: 'latest' })
+    expect(await ui.find({ text: /回答済み|あなたの最近の指示|過去の質問と回答/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('English cancelled badges and freeform answer labels render on both surfaces', async ($, on) => {
+  const options: EngineOptions = { response: 'Use temporary storage.' }
+  const calls = engineBeneath(on, { [QUESTIONS[0]!.question]: 'Choose a custom approach.' }, options)
+  await ask($)
+  await calls.clock.settle()
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: /^→ Answer: Choose a custom approach\.$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^Freeform answer$/ })).toBeDefined()
+    await ui.unmount()
+  }
+  options.toolError = true
+  options.response = undefined
+  await ask($, QUESTIONS, 'toolu_english_cancelled')
+  await calls.clock.settle()
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect((await ui.find({ type: 'Text', text: /^ Cancelled $/ }))?.props.backgroundColor).toBe('gray')
+    await ui.press({ key: 'hist' })
+    expect(await ui.find({ type: 'Text', text: /Freeform: Use temporary storage\./ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^  → Cancelled$/ })).toBeDefined()
+    await ui.press({ key: 'hist' })
+    await ui.unmount()
+  }
+})
+
+test('English multi-select labels render on both surfaces', async ($, on) => {
+  const calls = engineBeneath(on, {})
+  await ask($, [{ ...QUESTIONS[0]!, multiSelect: true }])
+  await calls.clock.settle()
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: /^\[Multiple selections allowed\]$/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('an unplaced English pane uses an English toast and title without altering the answer', async ($, on) => {
+  const answers = { [QUESTIONS[0]!.question]: 'SQLite' }
+  const calls = engineBeneath(on, answers, { isPlaced: false })
+  const ran = await ask($)
+  await calls.clock.settle()
+  expect(calls.opened).toEqual([{ id: 'qa-guide', title: 'Question guide' }])
+  expect(calls.toast).toEqual(['Question guide: use /qa-guide to view context and option details'])
+  expect(ran).toHaveProperty('result.answers', answers)
+})
+
+test('the English fork prompt retains four sections, quoted context and exact dialog numbering rules', async ($, on) => {
+  const calls = engineBeneath(on, {})
+  await submit($, 'Build a small demo board.')
+  await submit($, 'Keep setup simple and explain the choices.')
+  await ask($, NUMBERED_QUESTIONS)
+  await calls.clock.settle()
+  const prompt = calls.forkPrompts[0] ?? ''
+  const headings = ['### Current instructions', '### Why Claude is asking', '### Effect of each option', '### Recommendation']
+  for (const [i, heading] of headings.entries()) {
+    expect(prompt).toContain(heading)
+    if (i > 0) expect(prompt.indexOf(headings[i - 1]!)).toBeLessThan(prompt.indexOf(heading))
+  }
+  const sections = headings.map((heading, i) => prompt.slice(prompt.indexOf(heading), i + 1 < headings.length ? prompt.indexOf(headings[i + 1]!) : undefined))
+  expect(/2\s*[-–]\s*3\s*lines/.test(sections[0]!)).toBe(true)
+  expect(/1\s*[-–]\s*2\s*(?:short\s*)?lines/.test(sections[1]!)).toBe(true)
+  expect(sections[2]).toContain('1. <label>:')
+  expect(/same order|dialog order/i.test(sections[2]!)).toBe(true)
+  expect(sections[2]).toContain('number')
+  expect(/one line|1 line/i.test(sections[2]!)).toBe(true)
+  expect(/one sentence|1 sentence/i.test(sections[2]!)).toBe(true)
+  expect(sections[2]).toContain('#### Q<n>.')
+  expect(/restart.*1|start.*1.*again/i.test(sections[2]!)).toBe(true)
+  expect(/(?:do not|never).*Other|Other.*(?:do not|never)/i.test(sections[2]!)).toBe(true)
+  expect(sections[3]).toContain('→ 2. <label>:')
+  expect(sections[3]).toContain('→ Q1: 2. <label>')
+  expect(/one line|1 line/i.test(sections[3]!)).toBe(true)
+  expect(prompt).toContain(JSON.stringify(['Build a small demo board.', 'Keep setup simple and explain the choices.'], null, 1))
+  expect(prompt).toContain(JSON.stringify(NUMBERED_QUESTIONS, null, 1))
+  expect(prompt).not.toContain('### いまの指示（概要）')
+  expect(prompt).not.toContain('### おすすめ')
+})
+
+test('a question asked before the first response falls back to a stand-alone completion', async ($, on) => {
+  const prompts: { model: string; prompt: string }[] = []
+  engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, {
+    forkReply: { isAnswered: false, reason: 'nothing-to-fork' } as ModelForkResult,
+  })
+  on('model.complete', async (_$, e) => {
+    prompts.push({ model: e.model, prompt: e.prompt })
+    return { value: EXPLANATION as never }
+  })
+  await ask($)
+
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]!.model).toBe('haiku')
+  expect(prompts[0]!.prompt).toContain('Which database should the demo app use?')
+  expect(prompts[0]!.prompt).toContain('Next I need a database.')
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ text: /なぜ聞いているか/ })).toBeDefined()
+    expect(await ui.find({ text: /nothing-to-fork/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('other fork failures are shown without a fallback call', async ($, on) => {
+  let completes = 0
+  engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, {
+    forkReply: { isAnswered: false, reason: 'empty-reply', usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } as ModelForkResult,
+  })
+  on('model.complete', async () => {
+    completes += 1
+    return { value: EXPLANATION as never }
+  })
+  await ask($)
+
+  expect(completes).toBe(0)
+})
+
+test('English explanation lines wrap at spaces, not inside words', async ($, on) => {
+  const sentence = 'We need to choose a storage backend that fits the scope and complexity of the app before building persistence.'
+  const calls = engineBeneath(on, {}, { toolDelay: 1000, forkReply: { ...EXPLANATION, text: `### Why Claude is asking\n${sentence}` } })
+  const asked = $.tool.call({ tool: 'AskUserQuestion', tool_use_id: 'toolu_wrap', questions: [{ question: 'Where should data live?', header: 'Storage', multiSelect: false, options: [{ label: 'JSON file', description: '' }, { label: 'SQLite', description: '' }] }] })
+  await calls.clock.settle()
+
+  for (const columns of [36, 52]) {
+    const ui = await mountPane($, 'terminal', { ...PANE_PROPS, bodyColumns: columns })
+    const rows = (await ui.findAll({ type: 'Text' })).map(x => x.text)
+    const start = rows.findIndex(r => r.startsWith('We need'))
+    expect(start).toBeGreaterThan(-1)
+    const body: string[] = []
+    for (let i = start; i < rows.length && body.join(' ').length < sentence.length; i++) body.push(rows[i]!)
+    expect(body.length).toBeGreaterThan(1)
+    expect(body.join(' ')).toBe(sentence)
+    await ui.unmount()
+  }
+  await calls.clock.advance(1000)
+  await asked
 })

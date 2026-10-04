@@ -1,6 +1,6 @@
 {
   "name": "qa-guide",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shows Claude's AskUserQuestion prompts in a side pane with context, option details, an AI explanation and answer history.",
   "author": {
     "name": "aieo-product"
@@ -14,5 +14,18 @@
     "pane",
     "ui"
   ],
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "Language for pane labels and AI explanations (auto detects each question).",
+      "options": [
+        "auto",
+        "en",
+        "ja"
+      ],
+      "default": "auto"
+    }
+  }
 }
