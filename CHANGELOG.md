@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-05
+
+### Added
+
+- Measured token usage for each AI explanation: input, cache read, cache write and output, with `haiku` or `session` model labels
+- Session token total in the full-view toolbar, including re-runs and completed superseded calls
+
+### Changed
+
+- **Full context** re-runs replace the selected entry's usage while adding to the session total
+- Compact views show the usage line only when a row is available
+- English and Japanese token documentation now explains measured usage and session totals
+
 ## [0.3.0] - 2026-10-05
 
 ### Added
@@ -52,7 +65,8 @@ All notable changes to this project are documented here. The format follows [Kee
   - `/qa-guide` command, AI explanation toggle (`a`)
 - Marketplace manifest `claude-qamods`
 
-[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/aieo-product/claude_qamods/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/aieo-product/claude_qamods/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/aieo-product/claude_qamods/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/aieo-product/claude_qamods/releases/tag/v0.1.0

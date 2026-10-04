@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import type { ConfigRow, ModelCompleteRequest, ModelCompleteResult, ModelForkResult, On, PaneOpenArgs, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionMessage, ToolCallResult, UiScrollArgs } from 'claude-code'
+import type { ConfigRow, ModelCompleteRequest, ModelCompleteResult, ModelForkResult, ModelUsage, On, PaneOpenArgs, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionMessage, ToolCallResult, UiScrollArgs } from 'claude-code'
 
 import { buildCompactContext, openQuestionPane } from './register'
 import type { QaEntry } from '../types'
@@ -89,6 +89,7 @@ type Calls = {
   submitted: PromptSubmitInput[]
   savedPrompts: string[]
   savedEntries: QaEntry[]
+  savedUsageTotal?: number
   savedCursor?: number
   toast: string[]
   opened: PaneOpenArgs[]
@@ -132,6 +133,39 @@ const EXPLANATION = {
   },
 } satisfies ModelCompleteResult
 
+const MEASURED_USAGE: ModelUsage = {
+  input_tokens: 2140,
+  output_tokens: 612,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+}
+
+const SESSION_USAGE: ModelUsage = {
+  input_tokens: 520,
+  output_tokens: 80,
+  cache_creation_input_tokens: 1048,
+  cache_read_input_tokens: 14000,
+}
+
+const ZERO_USAGE: ModelUsage = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+}
+
+const USAGE_LINE = {
+  en: 'tokens · in 2,140 · cache read 0 · cache write 0 · out 612 · ',
+  ja: 'トークン ・ 入力 2,140 ・ キャッシュ読込 0 ・ キャッシュ書込 0 ・ 出力 612 ・ ',
+}
+
+const SESSION_USAGE_LINE = {
+  en: 'tokens · in 520 · cache read 14,000 · cache write 1,048 · out 80 · session',
+  ja: 'トークン ・ 入力 520 ・ キャッシュ読込 14,000 ・ キャッシュ書込 1,048 ・ 出力 80 ・ session',
+}
+
+const USAGE_PATTERN = /^(tokens ·|トークン ・)/
+
 function engineBeneath(on: On, answers: Record<string, string> | 'deny', options: EngineOptions = {}): Calls {
   const calls: Calls = {
     fork: 0,
@@ -157,6 +191,7 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
     if (ran.value?.isSet) {
       if (e.key === 'prompts') calls.savedPrompts = e.value
       if (e.key === 'entries') calls.savedEntries = e.value
+      if (e.key === 'usageTotal') calls.savedUsageTotal = e.value
       if (e.key === 'cursor') calls.savedCursor = e.value
     }
     return ran
@@ -545,8 +580,8 @@ for (const lang of ['en', 'ja'] as const) {
       test(`superseded ${lang} compact ${outcome} cannot replace Full context on ${surface}`, { options: { language: lang } }, async ($, on) => {
         const calls = engineBeneath(on, {}, {
           toolDelay: 100, completeDelay: 1000, completeThrows: outcome === 'rejection',
-          forkReply: { ...EXPLANATION, text: 'WINNING_FULL_DEMO' },
-          completeReply: outcome === 'answered' ? { ...EXPLANATION, text: 'STALE_COMPACT_DEMO' } : { isAnswered: false, reason: 'empty-reply', usage: EXPLANATION.usage },
+          forkReply: { ...EXPLANATION, text: 'WINNING_FULL_DEMO', usage: SESSION_USAGE },
+          completeReply: outcome === 'answered' ? { ...EXPLANATION, text: 'STALE_COMPACT_DEMO', usage: MEASURED_USAGE } : { isAnswered: false, reason: 'empty-reply', usage: MEASURED_USAGE },
         })
         const asked = ask($)
         await calls.clock.settle()
@@ -556,6 +591,9 @@ for (const lang of ['en', 'ja'] as const) {
         await ui.press({ key: 'deep' })
         await calls.clock.advance(900)
         expect(calls.savedEntries[0]).toMatchObject({ explainMode: 'full', explainState: 'done', explanation: 'WINNING_FULL_DEMO' })
+        expect(calls.savedEntries[0]).toMatchObject({ usage: SESSION_USAGE, usageModel: 'session' })
+        expect(calls.savedUsageTotal).toBe(outcome === 'rejection' ? 15648 : 18400)
+        expect((await ui.find({ type: 'Text', text: SESSION_USAGE_LINE[lang] }))?.props.dimColor).toBe(true)
         expect(await ui.find({ type: 'Markdown', text: /^WINNING_FULL_DEMO$/ })).toBeDefined()
         expect(await ui.find({ text: /STALE_COMPACT_DEMO|empty-reply/ })).toBeUndefined()
         await ui.unmount()
@@ -565,7 +603,7 @@ for (const lang of ['en', 'ja'] as const) {
     test(`a later ${lang} full run supersedes an earlier full run on ${surface}`, { options: { language: lang } }, async ($, on) => {
       const calls = engineBeneath(on, {}, {
         forkDelays: [1000, 0],
-        forkReplies: [{ ...EXPLANATION, text: 'STALE_FULL_DEMO' }, { ...EXPLANATION, text: 'LATEST_FULL_DEMO' }],
+        forkReplies: [{ ...EXPLANATION, text: 'STALE_FULL_DEMO', usage: MEASURED_USAGE }, { ...EXPLANATION, text: 'LATEST_FULL_DEMO', usage: SESSION_USAGE }],
       })
       await ask($)
       const ui = await mountPane($, surface)
@@ -577,11 +615,283 @@ for (const lang of ['en', 'ja'] as const) {
       await Promise.all([earlier, later])
       expect(calls.fork).toBe(2)
       expect(calls.savedEntries[0]).toMatchObject({ explainMode: 'full', explainState: 'done', explanation: 'LATEST_FULL_DEMO' })
+      expect(calls.savedEntries[0]).toMatchObject({ usage: SESSION_USAGE, usageModel: 'session' })
+      expect(calls.savedUsageTotal).toBe(18402)
       expect(await ui.find({ text: /STALE_FULL_DEMO/ })).toBeUndefined()
       await ui.unmount()
     })
   }
 }
+
+for (const lang of ['en', 'ja'] as const) {
+  for (const context of ['compact', 'full'] as const) {
+    test(`${lang} ${context} measured usage renders on both surfaces in compact and full panes`, { options: { language: lang, context } }, async ($, on) => {
+      const reply = { ...EXPLANATION, text: 'Demo guidance.', usage: MEASURED_USAGE }
+      const calls = engineBeneath(on, {}, { toolDelay: 1000, messages: [], completeReply: reply, forkReply: reply })
+      const asked = ask($)
+      await calls.clock.settle()
+      const model = context === 'compact' ? 'haiku' : 'session'
+      expect(calls.savedEntries[0]).toMatchObject({ usage: MEASURED_USAGE, usageModel: model })
+      expect(calls.savedUsageTotal).toBe(2752)
+      for (const surface of SURFACES) {
+        const ui = await mountPane($, surface, { ...COMPACT_PROPS, bodyColumns: 160 })
+        const usage = await ui.find({ type: 'Text', text: USAGE_LINE[lang] + model })
+        expect(usage?.props.dimColor).toBe(true)
+        expect(usage?.props.wrap).toBe('truncate-end')
+        const rows = compactTextRows(await ui.drawn())
+        const heading = rows.findIndex(row => row.text.includes(lang === 'en' ? 'AI explanation' : 'AI解説'))
+        const measured = rows.findIndex(row => row.text === USAGE_LINE[lang] + model)
+        expect(measured).toBe(heading + 1)
+        expect(rows.length).toBeLessThanOrEqual(COMPACT_PROPS.scroll!.bodyRows)
+        expect(await ui.find({ key: 'deep' })).toBeDefined()
+        await ui.unmount()
+      }
+      await calls.clock.advance(1000)
+      await asked
+      for (const surface of SURFACES) {
+        const ui = await mountPane($, surface)
+        expect((await ui.find({ type: 'Text', text: USAGE_LINE[lang] + model }))?.props.dimColor).toBe(true)
+        await ui.unmount()
+      }
+    })
+  }
+
+  test(`${lang} reruns replace entry usage while every request adds all four counts to the session`, { options: { language: lang } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, {
+      completeReply: { ...EXPLANATION, usage: MEASURED_USAGE },
+      forkReply: { ...EXPLANATION, usage: SESSION_USAGE },
+    })
+    await ask($, QUESTIONS, 'demo_usage_first')
+    await calls.clock.settle()
+    const first = await mountPane($, 'terminal')
+    await first.press({ key: 'deep' })
+    await calls.clock.settle()
+    expect(calls.savedEntries[0]).toMatchObject({ usage: SESSION_USAGE, usageModel: 'session' })
+    expect(calls.savedUsageTotal).toBe(18400)
+    await first.unmount()
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      expect((await ui.find({ type: 'Text', text: SESSION_USAGE_LINE[lang] }))?.props.dimColor).toBe(true)
+      const total = lang === 'en' ? 'AI tokens this session: 18.4k' : 'このセッションのAIトークン: 18.4k'
+      expect((await ui.find({ type: 'Text', text: total }))?.props.dimColor).toBe(true)
+      await ui.unmount()
+    }
+    const rerun = await mountPane($, 'desktop')
+    await rerun.press({ key: 'deep' })
+    await calls.clock.settle()
+    expect(calls.savedEntries[0]).toMatchObject({ usage: SESSION_USAGE, usageModel: 'session' })
+    expect(calls.savedUsageTotal).toBe(34048)
+    await rerun.unmount()
+    await ask($, QUESTIONS, 'demo_usage_latest')
+    await calls.clock.settle()
+    expect(calls.savedUsageTotal).toBe(36800)
+    expect(calls.savedEntries[1]).toMatchObject({ usage: MEASURED_USAGE, usageModel: 'haiku' })
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      if (await ui.find({ key: 'latest' })) await ui.press({ key: 'latest' })
+      expect(await ui.find({ type: 'Text', text: USAGE_LINE[lang] + 'haiku' })).toBeDefined()
+      await ui.press({ key: 'prev' })
+      expect(await ui.find({ type: 'Text', text: SESSION_USAGE_LINE[lang] })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: USAGE_LINE[lang] + 'haiku' })).toBeUndefined()
+      expect(calls.savedUsageTotal).toBe(36800)
+      await ui.unmount()
+    }
+  })
+
+  test(`${lang} old entries without usage and AI-off entries hide the usage line on both surfaces`, { options: { language: lang } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    let storedEntries: QaEntry[] | undefined
+    on('state.get', { plugin: 'qa-guide', key: 'entries' }, (_$, e, next) =>
+      storedEntries ? { value: { value: storedEntries, version: 1 } } as never : next(e))
+    const empty = await mountPane($, 'terminal')
+    await empty.press({ key: 'ai' })
+    await empty.unmount()
+    await ask($)
+    await calls.clock.settle()
+    expect(calls.complete).toBe(0)
+    expect(calls.fork).toBe(0)
+    expect(calls.savedEntries[0]).toHaveProperty('explainState', 'off')
+    expect(calls.savedEntries[0]).not.toHaveProperty('usage')
+    expect(calls.savedUsageTotal ?? 0).toBe(0)
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      expect(await ui.find({ type: 'Text', text: USAGE_PATTERN })).toBeUndefined()
+      await ui.unmount()
+    }
+    const legacy: QaEntry = {
+      id: 'demo_legacy_usage', lang, askedAt: 1, userPrompts: [], lead: '', questions: QUESTIONS,
+      explainMode: 'compact', explainState: 'done', explanation: 'Demo guidance.', status: 'answered', answers: {},
+    }
+    storedEntries = [legacy]
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      expect(await ui.find({ type: 'Text', text: USAGE_PATTERN })).toBeUndefined()
+      await ui.unmount()
+    }
+    legacy.status = 'open'
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface, COMPACT_PROPS)
+      expect(await ui.find({ type: 'Text', text: USAGE_PATTERN })).toBeUndefined()
+      expect(compactTextRows(await ui.drawn()).length).toBeLessThanOrEqual(COMPACT_PROPS.scroll!.bodyRows)
+      await ui.unmount()
+    }
+  })
+}
+
+for (const context of ['compact', 'full'] as const) {
+  for (const reason of ['api-error', 'aborted', 'empty-reply'] as const) {
+    test(`${context} ${reason} results retain measured usage even without an explanation`, { options: { language: 'en', context } }, async ($, on) => {
+      const usage = context === 'full' ? SESSION_USAGE : reason === 'empty-reply' ? MEASURED_USAGE : ZERO_USAGE
+      const reply: ModelCompleteResult = reason === 'api-error'
+        ? { isAnswered: false, reason, status: 429, error: 'rate_limit', usage }
+        : { isAnswered: false, reason, usage }
+      const calls = engineBeneath(on, {}, { completeReply: reply, forkReply: reply })
+      await ask($)
+      await calls.clock.settle()
+      const model = context === 'compact' ? 'haiku' : 'session'
+      expect(calls.savedEntries[0]).toMatchObject({ explainState: 'error', explanation: reason, usage, usageModel: model })
+      expect(calls.savedUsageTotal ?? 0).toBe(context === 'full' ? 15648 : usage === ZERO_USAGE ? 0 : 2752)
+      for (const surface of SURFACES) {
+        const ui = await mountPane($, surface)
+        const line = context === 'full' ? SESSION_USAGE_LINE.en : usage === ZERO_USAGE ? `tokens · in 0 · cache read 0 · cache write 0 · out 0 · ${model}` : USAGE_LINE.en + model
+        expect((await ui.find({ type: 'Text', text: line }))?.props.dimColor).toBe(true)
+        expect(await ui.find({ type: 'Text', text: new RegExp(reason) })).toBeDefined()
+        await ui.unmount()
+      }
+    })
+  }
+}
+
+test('a completion rejection has no measured usage or session spend', async ($, on) => {
+  const calls = engineBeneath(on, {}, { completeThrows: true })
+  await ask($)
+  await calls.clock.settle()
+  expect(calls.savedEntries[0]).toHaveProperty('explainState', 'error')
+  expect(calls.savedEntries[0]).not.toHaveProperty('usage')
+  expect(calls.savedUsageTotal ?? 0).toBe(0)
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: USAGE_PATTERN })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('a pending rerun hides the previous result usage until its measured result arrives', async ($, on) => {
+  const calls = engineBeneath(on, {}, {
+    completeReply: { ...EXPLANATION, usage: MEASURED_USAGE },
+    forkReply: { ...EXPLANATION, usage: SESSION_USAGE },
+    forkDelay: 1000,
+  })
+  await ask($)
+  await calls.clock.settle()
+  const first = await mountPane($, 'terminal')
+  const rerun = first.press({ key: 'deep' })
+  await calls.clock.settle()
+  expect(calls.savedEntries[0]).toHaveProperty('explainState', 'pending')
+  expect(calls.savedEntries[0]).not.toHaveProperty('usage')
+  expect(calls.savedEntries[0]).not.toHaveProperty('usageModel')
+  expect(calls.savedUsageTotal).toBe(2752)
+  for (const surface of SURFACES) {
+    const ui = surface === 'terminal' ? first : await mountPane($, surface)
+    expect(await ui.find({ type: 'Text', text: USAGE_PATTERN })).toBeUndefined()
+    if (surface !== 'terminal') await ui.unmount()
+  }
+  await calls.clock.advance(1000)
+  await rerun
+  expect(calls.savedEntries[0]).toMatchObject({ usage: SESSION_USAGE, usageModel: 'session' })
+  expect(calls.savedUsageTotal).toBe(18400)
+  await first.unmount()
+})
+
+test('concurrent question completions each add measured usage to the session total', async ($, on) => {
+  const calls = engineBeneath(on, {}, { completeDelay: 1000, completeReply: { ...EXPLANATION, usage: MEASURED_USAGE } })
+  await ask($, QUESTIONS, 'demo_concurrent_first')
+  await ask($, QUESTIONS, 'demo_concurrent_second')
+  await calls.clock.settle()
+  await calls.clock.advance(1000)
+  expect(calls.savedEntries).toHaveLength(2)
+  for (const entry of calls.savedEntries) expect(entry).toMatchObject({ explainState: 'done', usage: MEASURED_USAGE, usageModel: 'haiku' })
+  expect(calls.savedUsageTotal).toBe(5504)
+})
+
+for (const carriesUsage of [false, true]) {
+  test(`nothing-to-fork fallback records Haiku usage${carriesUsage ? ' and any carried fork usage' : ''}`, { options: { context: 'full' } }, async ($, on) => {
+    const forkReply: ModelForkResult = carriesUsage
+      ? { isAnswered: false, reason: 'nothing-to-fork', usage: SESSION_USAGE } as ModelForkResult
+      : { isAnswered: false, reason: 'nothing-to-fork' }
+    const calls = engineBeneath(on, {}, { forkReply, completeReply: { ...EXPLANATION, usage: MEASURED_USAGE } })
+    await ask($)
+    await calls.clock.settle()
+    expect(calls.fork).toBe(1)
+    expect(calls.complete).toBe(1)
+    const usage: ModelUsage = carriesUsage
+      ? { input_tokens: 2660, output_tokens: 692, cache_creation_input_tokens: 1048, cache_read_input_tokens: 14000 }
+      : MEASURED_USAGE
+    expect(calls.savedEntries[0]).toMatchObject({ explainMode: 'full', explainState: 'done', usage, usageModel: 'haiku' })
+    expect(calls.savedUsageTotal).toBe(carriesUsage ? 18400 : 2752)
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface)
+      const line = carriesUsage
+        ? 'tokens · in 2,660 · cache read 14,000 · cache write 1,048 · out 692 · haiku'
+        : USAGE_LINE.en + 'haiku'
+      expect((await ui.find({ type: 'Text', text: line }))?.props.dimColor).toBe(true)
+      expect(await ui.find({ text: /nothing-to-fork/ })).toBeUndefined()
+      await ui.unmount()
+    }
+  })
+}
+
+for (const surface of SURFACES) {
+  test(`a spent stale nothing-to-fork result adds session tokens without starting fallback on ${surface}`, { options: { context: 'full' } }, async ($, on) => {
+    const spentFork = { isAnswered: false, reason: 'nothing-to-fork', usage: MEASURED_USAGE } as ModelForkResult
+    const calls = engineBeneath(on, {}, {
+      forkDelays: [1000, 0],
+      forkReplies: [spentFork, { ...EXPLANATION, text: 'LATEST_FULL_DEMO', usage: SESSION_USAGE }],
+    })
+    await ask($)
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'deep' })
+    await calls.clock.settle()
+    expect(calls.savedUsageTotal).toBe(15648)
+    await calls.clock.advance(1000)
+    expect(calls.fork).toBe(2)
+    expect(calls.complete).toBe(0)
+    expect(calls.savedEntries[0]).toMatchObject({ explainState: 'done', explanation: 'LATEST_FULL_DEMO', usage: SESSION_USAGE, usageModel: 'session' })
+    expect(calls.savedUsageTotal).toBe(18400)
+    expect(await ui.find({ type: 'Text', text: SESSION_USAGE_LINE.en })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'AI tokens this session: 18.4k' })).toBeDefined()
+    await ui.unmount()
+  })
+}
+
+test('measured compact usage never steals content or the Full context button from the row budget', async ($, on) => {
+  const calls = engineBeneath(on, {}, {
+    toolDelay: 1000, messages: [], completeReply: { ...EXPLANATION, text: 'Demo guidance.', usage: MEASURED_USAGE },
+  })
+  const asked = ask($)
+  await calls.clock.settle()
+  for (const bodyRows of [0, 1, 2, 3, 4, 20]) {
+    for (const surface of SURFACES) {
+      const ui = await mountPane($, surface, { ...PANE_PROPS, bodyColumns: 160, scroll: { offset: 0, bodyRows } })
+      const rows = compactTextRows(await ui.drawn())
+      expect(rows.length).toBeLessThanOrEqual(bodyRows)
+      expect(rows.some(row => row.text.includes('Demo guidance.'))).toBe(bodyRows >= 2)
+      if (bodyRows === 2 || bodyRows === 3) expect(await ui.find({ type: 'Text', text: USAGE_PATTERN })).toBeUndefined()
+      if (bodyRows === 3) expect(await ui.find({ key: 'deep' })).toBeDefined()
+      if (bodyRows >= 4) {
+        expect(await ui.find({ type: 'Text', text: USAGE_LINE.en + 'haiku' })).toBeDefined()
+        expect(await ui.find({ key: 'deep' })).toBeDefined()
+      }
+      for (const row of rows) {
+        if (row.props.key !== 'deep') expect(row.props.wrap).toBe('truncate-end')
+        expect(row.text).not.toContain('\n')
+      }
+      await ui.unmount()
+    }
+  }
+  await calls.clock.advance(1000)
+  await asked
+})
 
 test('prompt submission records only the person origins and forwards every original input unchanged', { options: { language: 'ja' } }, async ($, on) => {
   const calls = engineBeneath(on, {})
@@ -908,6 +1218,7 @@ test('compact spacers never displace numbered AI content when the row budget is 
       const rows = compactTextRows(await ui.drawn())
       const aiRows = compactTextRows(await ui.find({ key: 'compact-ai' }))
       expect(rows.length).toBeLessThanOrEqual(bodyRows)
+      expect(await ui.find({ type: 'Text', text: USAGE_PATTERN })).toBeUndefined()
       expect(rows.some(row => !row.text.trim())).toBe(false)
       expect(aiRows[0]?.text).toContain('いまの指示（概要）')
       expect(aiRows[aiRows.length - 1]?.text).toBe('…')
@@ -1022,6 +1333,7 @@ test('an open question fits 20 background-only rows with AI, the newest instruct
     expect(await ui.find({ text: /LEAD_HEAD/ })).toBeUndefined()
     expect(rows.length).toBeLessThanOrEqual(20)
     expect(rows.length).toBe(20)
+    expect(await ui.find({ type: 'Text', text: USAGE_PATTERN })).toBeUndefined()
     for (const row of rows) {
       if (row.props.key !== 'deep') expect(row.props.wrap).toBe('truncate-end')
       expect(row.text).not.toContain('\n')

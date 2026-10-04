@@ -1,6 +1,6 @@
 {
   "name": "qa-guide",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Shows Claude's AskUserQuestion prompts in a side pane with context, option details, an AI explanation and answer history.",
   "author": {
     "name": "aieo-product"

@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, SessionMessage } from 'claude-code'
+import type { EngineInterface, ModelForkResult, ModelUsage, Register, SessionMessage } from 'claude-code'
 
 import type { QaEntry, QaQuestion } from '../types'
 
@@ -40,6 +40,11 @@ const STRINGS = {
     freeformAnswer: 'Freeform answer',
     aiTitle: '✦ AI explanation (instructions, context, effects, recommendation)',
     aiPrefix: '✦ AI explanation: ',
+    usageLine: 'tokens · in {input} · cache read {read} · cache write {write} · out {output} · {model}',
+    sessionUsage: 'AI tokens this session: {total}',
+    thousands: '{count}k',
+    haikuModel: 'haiku',
+    sessionModel: 'session',
     deep: 'Full context',
     compactContext: 'compact context',
     fullContext: 'full context',
@@ -117,6 +122,11 @@ const STRINGS = {
     freeformAnswer: '自由記述の回答',
     aiTitle: '✦ AI解説（指示・背景・影響・おすすめ）',
     aiPrefix: '✦ AI解説: ',
+    usageLine: 'トークン ・ 入力 {input} ・ キャッシュ読込 {read} ・ キャッシュ書込 {write} ・ 出力 {output} ・ {model}',
+    sessionUsage: 'このセッションのAIトークン: {total}',
+    thousands: '{count}k',
+    haikuModel: 'haiku',
+    sessionModel: 'session',
     deep: '全文脈で解説',
     compactContext: '要点のみ',
     fullContext: '全文脈',
@@ -200,6 +210,23 @@ const prompts = atom({ plugin: 'qa-guide', key: 'prompts' } as const, [])
 const isAiOn = atom({ plugin: 'qa-guide', key: 'isAiOn' } as const, true)
 const showHistory = atom({ plugin: 'qa-guide', key: 'showHistory' } as const, false)
 const cursor = atom({ plugin: 'qa-guide', key: 'cursor' } as const, 0)
+const usageTotal = atom({ plugin: 'qa-guide', key: 'usageTotal' } as const, 0)
+
+const addUsage = (previous: ModelUsage | undefined, usage: ModelUsage): ModelUsage => ({
+  input_tokens: (previous?.input_tokens ?? 0) + usage.input_tokens,
+  output_tokens: (previous?.output_tokens ?? 0) + usage.output_tokens,
+  cache_read_input_tokens: (previous?.cache_read_input_tokens ?? 0) + usage.cache_read_input_tokens,
+  cache_creation_input_tokens: (previous?.cache_creation_input_tokens ?? 0) + usage.cache_creation_input_tokens,
+})
+
+const tokenCount = (usage: ModelUsage) => usage.input_tokens + usage.output_tokens +
+  usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+
+const groupedTokens = (count: number) => String(count).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+
+const totalTokens = (lang: Lang, count: number) => count < 1000
+  ? groupedTokens(count)
+  : t(lang, 'thousands', { count: (count / 1000).toFixed(1) })
 
 const clampCursor = (value: number, length: number) =>
   Math.min(Math.max(0, Math.trunc(Number.isFinite(value) ? value : 0)), Math.max(0, length - 1))
@@ -498,9 +525,24 @@ async function explain(
   const entry = (await read($, entries)).find(x => x.id === entryId)
   if (!entry || runIds.get(entryId) !== runId) return
   await update($, entries, list => runIds.get(entryId) !== runId ? list : list.map(x =>
-    x.id === entryId ? { ...x, explainMode: mode, explainState: 'pending' as const, explanation: '' } : x,
+    x.id === entryId ? {
+      ...x, explainMode: mode, explainState: 'pending' as const, explanation: '',
+      usage: undefined, usageModel: undefined,
+    } : x,
   ))
   if (runIds.get(entryId) !== runId) return
+
+  let usage: ModelUsage | undefined
+  let usageModel: QaEntry['usageModel'] = mode === 'compact' ? 'haiku' : 'session'
+  const recordUsage = async (reply: ModelForkResult) => {
+    // Spend belongs to the session even when this run has been superseded.
+    // nothing-to-fork has no usage, since no request was made.
+    if ('usage' in reply) {
+      usage = addUsage(usage, reply.usage)
+      await update($, usageTotal, total => total + tokenCount(reply.usage))
+    }
+    return reply
+  }
 
   const prompt = mode === 'compact'
     ? compactContexts.get(entryId) ?? buildCompactContext([], entry.userPrompts ?? [], entry.lead, entry.questions, entry.lang ?? 'ja')
@@ -510,24 +552,25 @@ async function explain(
         model: 'haiku',
         prompt,
         maxTokens: 1500,
-      })
-    : $.model.fork({ prompt }).then(reply => {
+      }).then(recordUsage)
+    : $.model.fork({ prompt }).then(recordUsage).then(reply => {
         // Before the first response there is no transcript to fork.
         if (reply.isAnswered || reply.reason !== 'nothing-to-fork') return reply
         if (runIds.get(entryId) !== runId) return reply
+        usageModel = 'haiku'
         const context = entry.lead.trim() ? `\n\n${t(entry.lang ?? 'ja', 'leadData')}\n${JSON.stringify(entry.lead)}` : ''
-        return $.model.complete({ model: 'haiku', prompt: prompt + context, maxTokens: 1500 })
+        return $.model.complete({ model: 'haiku', prompt: prompt + context, maxTokens: 1500 }).then(recordUsage)
       })
   void request.then(
     reply => update($, entries, list => runIds.get(entryId) !== runId ? list : list.map(x =>
       x.id === entryId
         ? reply.isAnswered
-          ? { ...x, explainState: 'done' as const, explanation: clip(reply.text, 6000) }
-          : { ...x, explainState: 'error' as const, explanation: String(reply.reason) }
+          ? { ...x, explainState: 'done' as const, explanation: clip(reply.text, 6000), usage, usageModel }
+          : { ...x, explainState: 'error' as const, explanation: String(reply.reason), usage, usageModel }
         : x,
     )),
     () => update($, entries, list => runIds.get(entryId) !== runId ? list : list.map(x =>
-      x.id === entryId ? { ...x, explainState: 'error' as const } : x,
+      x.id === entryId ? { ...x, explainState: 'error' as const, usage, usageModel } : x,
     )),
   ).catch(() => {
     // The session (or this module) may have ended while the explanation ran.
@@ -677,6 +720,7 @@ export const register: Register = (on, options) => {
     }))
     const aiOn = await read($, isAiOn)
     const history = await read($, showHistory)
+    const total = await read($, usageTotal)
     const width = Math.max(20, e.props.bodyColumns)
     const selectedCursor = clampCursor(await read($, cursor), list.length)
     const newest = list[list.length - 1]
@@ -744,6 +788,7 @@ export const register: Register = (on, options) => {
           />
           <Button key="close" role="dismiss" plain label={t(lang, 'close')} onPress={() => $.ui.close({ id: PANE })} />
         </Box>
+        <Text dimColor>{t(lang, 'sessionUsage', { total: totalTokens(lang, total) })}</Text>
       </Box>
     )
 
@@ -765,6 +810,13 @@ export const register: Register = (on, options) => {
         <Text backgroundColor="gray" color="black" bold>{t(lang, 'cancelled')}</Text>
       )
     const modeTag = t(lang, current.explainMode === 'compact' ? 'compactContext' : 'fullContext')
+    const usageLine = current.usage && current.usageModel ? t(lang, 'usageLine', {
+      input: groupedTokens(current.usage.input_tokens),
+      read: groupedTokens(current.usage.cache_read_input_tokens),
+      write: groupedTokens(current.usage.cache_creation_input_tokens),
+      output: groupedTokens(current.usage.output_tokens),
+      model: t(lang, current.usageModel === 'session' ? 'sessionModel' : 'haikuModel'),
+    }) : undefined
     const deepButton = <Button key="deep" hotkey="f" plain label={t(lang, 'deep')} onPress={() => explain($, current.id, 'full', compactContexts, runIds)} />
 
     if (newest?.status === 'open') {
@@ -805,6 +857,8 @@ export const register: Register = (on, options) => {
       const leadSpacer = leadLines.length > 0 && remaining > 0
       if (leadSpacer) remaining -= 1
       const showDeep = current.explainState === 'done' && remaining > 0
+      if (showDeep) remaining -= 1
+      const showUsage = !!usageLine && aiLines.length > 0 && remaining > 0
       const showModeTag = !!aiLines[0] &&
         (current.explainState === 'done' ||
           [...`${aiLines[0].text} ${modeTag}`].reduce((cells, char) => cells + cellWidth(char), 0) <= columns)
@@ -826,7 +880,7 @@ export const register: Register = (on, options) => {
           )}
           {aiLines.length > 0 && (
             <Box key="compact-ai" flexDirection="column">
-              {displayedAiLines.map((line, i) => (
+              {displayedAiLines.flatMap((line, i) => [
                 <Text
                   key={`ai${i}`}
                   color={line.recommendation ? 'green' : line.heading || (i === 0 && !line.option) ? 'magenta' : undefined}
@@ -846,8 +900,11 @@ export const register: Register = (on, options) => {
                   {line.option && line.text.slice(line.option.labelEnd)}
                   {i === 0 && showModeTag && line.text && ' '}
                   {i === 0 && showModeTag && <Text dimColor bold={false}>{inlineModeTag}</Text>}
-                </Text>
-              ))}
+                </Text>,
+                ...(i === 0 && showUsage
+                  ? [<Text key="usage" dimColor wrap="truncate-end">{truncateCells(usageLine!, columns)}</Text>]
+                  : []),
+              ])}
             </Box>
           )}
           {showDeep && deepButton}
@@ -939,6 +996,7 @@ export const register: Register = (on, options) => {
             <Text color="magenta" bold>{t(lang, 'aiTitle')}</Text>
             <Text dimColor>{modeTag}</Text>
           </Box>
+          {usageLine && <Text dimColor>{usageLine}</Text>}
           {current.explainState === 'pending' && <Text dimColor>{t(lang, 'generating')}</Text>}
           {current.explainState === 'done' && <Markdown text={current.explanation} />}
           {current.explainState === 'error' && <Text color="red">{t(lang, 'explainError', { explanation: current.explanation })}</Text>}
