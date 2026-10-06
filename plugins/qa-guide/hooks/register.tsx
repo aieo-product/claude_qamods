@@ -784,10 +784,17 @@ async function explainWaiting(
   try {
     const got = await $.session.messages()
     messages = Array.isArray(got) ? got : []
+    if (!userPrompts.length) {
+      userPrompts.push(...messages.filter(isRealUserMessage).slice(-3).map(m => m.text.trim().slice(0, 600)))
+      if (userPrompts.length) await update($, entries, list => list.map(x =>
+        x.id === entry.id ? { ...x, userPrompts } : x,
+      ))
+    }
   } catch {
     // Context is best-effort.
   }
   compactContexts.set(entry.id, buildCompactContext(messages, userPrompts, pending.text, questions, pending.lang, entry.kind))
+  if (compactContexts.size > 20) compactContexts.delete(compactContexts.keys().next().value!)
   await openQuestionPane({ open: args => $.ui.open(args), scroll: args => $.ui.scroll(args) }, pending.lang)
   await explain($, entry.id, 'compact', compactContexts, runIds)
 }
@@ -819,7 +826,7 @@ export const register: Register = (on, options) => {
     if (!('drop' in ran)) {
       try {
         if ((e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk') &&
-          e.text.trim()) {
+          (e.text.trim() || e.attachments?.length)) {
           // Only a reply that reached Claude answers a plain-text question; a
           // question detected after this prompt was sent is left alone.
           let answered: QaWaiting | null = null
@@ -831,7 +838,7 @@ export const register: Register = (on, options) => {
           })
           const old = answered as QaWaiting | null
           if (old?.entryId) {
-            await settleChat($, old.entryId, { status: 'answered', answers: { [old.question]: e.text } }, settled)
+            await settleChat($, old.entryId, { status: 'answered', answers: { [old.question]: ran.text ?? e.text } }, settled)
           }
         }
       } catch {
@@ -852,8 +859,8 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'qa-guide' }, async $ => {
     const list = await read($, entries)
-    const newest = list[list.length - 1]
-    const current = isOpenDialog(newest) ? newest! : list[list.length - 1 - clampCursor(await read($, cursor), list.length)]
+    const openDialog = [...list].reverse().find(isOpenDialog)
+    const current = openDialog ?? list[list.length - 1 - clampCursor(await read($, cursor), list.length)]
     const lang = current ? current.lang ?? 'ja' : await resolveLang($, options.language)
     await $.ui.open({ id: PANE, title: t(lang, 'title') })
 
@@ -961,14 +968,14 @@ export const register: Register = (on, options) => {
     try {
       if (options.chatQuestions === 'on' && !e.agentId && e.reason === 'answer' && !e.isAborted) {
         const found = detectWaiting(e.answer)
-        const lang: Lang = /[\u3040-\u30ff]/.test(e.answer) ? 'ja'
-          : options.language === 'ja' || options.language === 'en' ? options.language : 'en'
+        const lang: Lang = options.language === 'ja' || options.language === 'en' ? options.language
+          : detectLang(found ? [{ ...found, header: '', multiSelect: false }] : [])
         const id = `chat-${e.turnId}`
         let replaced: QaWaiting | null = null
         await update($, waiting, w => {
           replaced = w
           return found
-            ? { id, lang: options.language === 'ja' || options.language === 'en' ? options.language : lang,
+            ? { id, lang,
                 question: found.question, options: found.options, text: tail(e.answer, 2500) }
             : null
         })
@@ -1039,8 +1046,8 @@ export const register: Register = (on, options) => {
     const showCost = options.showCost !== 'off'
     const width = Math.max(20, e.props.bodyColumns)
     const selectedCursor = clampCursor(await read($, cursor), list.length)
-    const newest = list[list.length - 1]
-    const current = isOpenDialog(newest) ? newest! : list[list.length - 1 - selectedCursor]
+    const openDialog = [...list].reverse().find(isOpenDialog)
+    const current = openDialog ?? list[list.length - 1 - selectedCursor]
     const lang = current?.lang ?? await resolveLang($, options.language)
     const sessionCost = showCost && cost.hasPricedUsage
       ? costSuffix(lang, cost.usd, cost.hasUnpricedUsage || total > cost.tokens) : ''
@@ -1137,7 +1144,7 @@ export const register: Register = (on, options) => {
     }) + (showCost ? costSuffix(lang, current.costUsd, current.costIncomplete) : '') : undefined
     const deepButton = <Button key="deep" hotkey="f" plain label={t(lang, 'deep')} onPress={() => explain($, current.id, 'full', compactContexts, runIds)} />
 
-    if (isOpenDialog(newest)) {
+    if (openDialog) {
       const columns = Math.max(1, Math.floor(e.props.bodyColumns))
       const bodyRows = Math.max(0, Math.floor(e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 24))
       let remaining = Math.max(0, bodyRows - 1) // one header row

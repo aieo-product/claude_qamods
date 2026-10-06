@@ -118,6 +118,8 @@ type EngineOptions = {
   toolError?: boolean
   toolThrows?: boolean
   promptDrop?: string
+  promptRewrite?: string
+  firstOpenDelay?: number
   agentMessages?: SessionMessage[]
   response?: string
   messages?: SessionMessage[]
@@ -239,8 +241,9 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
     if (options.modelThrows) throw new Error('Demo session model is unavailable.')
     return { value: options.sessionModel ?? 'demo-unpriced-model' }
   })
-  on('ui.open', (_$, e) => {
+  on('ui.open', async (_$, e) => {
     calls.opened.push(e)
+    if (calls.opened.length === 1 && options.firstOpenDelay) await calls.clock.sleep(options.firstOpenDelay)
     return { value: options.isPlaced === false
       ? { isPlaced: false, reason: 'Terminal is narrower than 144 columns.' }
       : { isPlaced: true } }
@@ -257,8 +260,9 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('prompt.submit', (_$, e) => {
     if (e.text === options.promptDrop) return { drop: 'Handled by another hook.' }
-    calls.submitted.push(e)
-    return { text: e.text, context: e.context, origin: e.origin }
+    const input = options.promptRewrite === undefined ? e : { ...e, text: options.promptRewrite }
+    calls.submitted.push(input)
+    return { text: input.text, context: input.context, origin: input.origin }
   })
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: {}, children: [] }))
@@ -2111,10 +2115,11 @@ for (const [cursor, index] of [[-9, 2], [99, 0]] as const) {
   })
 }
 
-test('a historical open entry uses the full layout while the newest question is answered', { options: { language: 'ja' } }, async ($, on) => {
+test('a historical open chat entry uses the full layout while the newest question is answered', { options: { language: 'ja' } }, async ($, on) => {
   engineBeneath(on, {}, { cursor: 1 })
   const history: QaEntry[] = NAV_QUESTIONS.map((questions, index) => ({
     id: `toolu_retained_${index}`,
+    kind: index === 1 ? 'chat' : 'dialog',
     lang: 'ja',
     askedAt: index + 1,
     userPrompts: [`RETAINED_INSTRUCTION_${index}: review the demo.`],
@@ -3412,6 +3417,171 @@ function expectChatInstructions(prompt: string, lang: 'en' | 'ja') {
 }
 
 for (const surface of SURFACES) {
+  test(`a late chat entry keeps the open dialog pinned in the pane and command on ${surface}`, { options: { chatQuestions: 'on', language: 'auto' } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, { toolDelay: 2000 })
+    let held = false
+    on('state.get', { plugin: 'qa-guide', key: 'prompts' }, async (_$, e, next) => {
+      if (!held && calls.savedWaiting?.entryId) {
+        held = true
+        await calls.clock.sleep(1000)
+      }
+      return next(e)
+    })
+    await finishTurn($, CHAT_QUESTIONS.ja)
+    const band = await mountBand($, surface)
+    const explained = band.press({ key: 'explain-waiting' })
+    await calls.clock.settle()
+    expect(held).toBe(true)
+    await submit($, 'Use SQLite.')
+    const older = ask($, JAPANESE_QUESTIONS, 'toolu_older')
+    await calls.clock.settle()
+    const pending = ask($)
+    await calls.clock.settle()
+    await calls.clock.advance(1000)
+    await explained
+    expect(calls.savedEntries.map(entry => [entry.kind, entry.status, entry.lang])).toEqual([
+      [undefined, 'open', 'ja'], [undefined, 'open', 'en'], ['chat', 'answered', 'ja'],
+    ])
+    const pane = await mountPane($, surface, COMPACT_PROPS)
+    expect(await pane.find({ key: 'compact-ai' })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /^ Question context $/ })).toBeDefined()
+    expect(await pane.find({ key: 'hist' })).toBeUndefined()
+    expect(await $.command.run({ command: 'qa-guide', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 180 } }))
+      .toEqual({ text: 'Opened the question guide.' })
+    expect(calls.opened[calls.opened.length - 1]).toEqual({ id: 'qa-guide', title: 'Question guide' })
+    await pane.unmount()
+    await band.unmount()
+    await calls.clock.advance(1000)
+    await Promise.all([older, pending])
+  })
+
+  test(`plain-text explanation restores bounded real user instructions from an empty history on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+    const humanTexts = ['Earlier demo task.', 'Build a demo task board.', 'Keep the interface minimal.', 'Use SQLite. ' + 'Keep this detail. '.repeat(45)]
+    const calls = engineBeneath(on, {}, { messages: [
+      { role: 'user', text: humanTexts[0]!, toolUses: [] },
+      { role: 'user', text: humanTexts[1]!, toolUses: [] },
+      { role: 'user', text: '<command-message>demo command</command-message>', toolUses: [] },
+      { role: 'user', text: humanTexts[2]!, toolUses: [] },
+      { role: 'user', text: '<system-reminder>Demo reminder.</system-reminder>', toolUses: [] },
+      { role: 'user', text: 'Tool result is not a person instruction.', toolUses: [], toolResults: [
+        { tool_use_id: 'toolu_demo', text: 'Demo scaffold finished.', isError: false },
+      ] },
+      { role: 'user', text: `  ${humanTexts[3]}  `, toolUses: [] },
+      { role: 'user', text: ' \n ', toolUses: [] },
+      { role: 'user', text: '<task-notification>Demo task finished.</task-notification>', toolUses: [] },
+    ] })
+    await finishTurn($, CHAT_QUESTIONS.en)
+    const band = await mountBand($, surface)
+    await band.press({ key: 'explain-waiting' })
+    await calls.clock.settle()
+    const expected = humanTexts.slice(-3).map(text => text.slice(0, 600))
+    expect(calls.savedEntries[0]?.userPrompts).toEqual(expected)
+    expect(calls.completePrompts[0]).toContain(JSON.stringify(expected, null, 1))
+    expect(calls.completePrompts[0]).not.toContain('Earlier demo task.')
+    expect(calls.completePrompts[0]).not.toContain('Tool result is not')
+    expect(calls.completePrompts[0]).not.toContain('<task-notification>')
+    await band.unmount()
+    const pane = await mountPane($, surface)
+    expect(await pane.find({ type: 'Text', text: /Build a demo task board/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /Keep the interface minimal/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /Use SQLite/ })).toBeDefined()
+    await pane.unmount()
+  })
+
+  test(`an attachment-only reply answers the explained chat entry and clears the band on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    const question = 'Would you like to attach a screenshot?'
+    await finishTurn($, question)
+    await submit($, '??')
+    await calls.clock.settle()
+    const input: PromptSubmitInput = { text: '', origin: { kind: 'composer' }, wait: false, attachments: [{ type: 'image', mediaType: 'image/png', filename: 'demo.png' }] }
+    expect(await $.prompt.submit(input)).toEqual({ text: input.text, context: input.context, origin: input.origin })
+    expect(calls.submitted).toEqual([input])
+    expect(calls.savedWaiting).toBeNull()
+    expect(calls.savedEntries[0]).toMatchObject({ status: 'answered', answers: { [question]: '' } })
+    const band = await mountBand($, surface)
+    expect(await band.find({ key: 'explain-waiting' })).toBeUndefined()
+    expect(await band.find({ key: 'dismiss-waiting' })).toBeUndefined()
+    await band.unmount()
+    await finishTurn($, 'The screenshot is attached.', { turnId: 'demo-attachment' })
+    expect(calls.savedEntries[0]).toMatchObject({ status: 'answered', answers: { [question]: '' } })
+  })
+
+  for (const { name, answer, lang } of [
+    { name: 'ignores unrelated kana and option descriptions', answer: `Test data includes こんにちは.\nWhich database do you prefer?\n1. SQLite: かんたん\n2. PostgreSQL: production-ready`, lang: 'en' },
+    { name: 'detects kana in option labels', answer: 'Which database do you prefer?\n1. キャンバス: simple\n2. PostgreSQL: production-ready', lang: 'ja' },
+  ] as const) {
+    test(`plain-text automatic language ${name} on ${surface}`, { options: { chatQuestions: 'on', language: 'auto' } }, async ($, on) => {
+      const calls = engineBeneath(on, {})
+      await finishTurn($, answer)
+      expect(calls.savedWaiting?.lang).toBe(lang)
+      const band = await mountBand($, surface)
+      expect((await band.find({ key: 'explain-waiting' }))?.props.label).toBe(lang === 'en' ? 'Explain' : 'AI要約')
+      await band.press({ key: 'explain-waiting' })
+      await calls.clock.settle()
+      expect(calls.savedEntries[0]?.lang).toBe(lang)
+      expectChatInstructions(calls.completePrompts[0]!, lang)
+      await band.unmount()
+    })
+  }
+
+  test(`a downstream rewritten reply is stored as the chat answer on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, { promptRewrite: 'Use PostgreSQL.' })
+    const question = 'Which database do you prefer?'
+    await finishTurn($, question)
+    const band = await mountBand($, surface)
+    await band.press({ key: 'explain-waiting' })
+    await calls.clock.settle()
+    expect(await submit($, 'Use SQLite.')).toMatchObject({ text: 'Use PostgreSQL.' })
+    expect(calls.submitted.map(input => input.text)).toEqual(['Use PostgreSQL.'])
+    expect(calls.savedEntries[0]).toMatchObject({ status: 'answered', answers: { [question]: 'Use PostgreSQL.' } })
+    expect(calls.savedWaiting).toBeNull()
+    await band.unmount()
+  })
+
+  for (const count of [20, 21]) {
+    test(`plain-text compact contexts ${count === 20 ? 'retain 20 entries' : 'evict the oldest of 21 entries'} on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+      const options: EngineOptions = { firstOpenDelay: 1000, messages: [{ role: 'assistant', text: '', toolUses: [
+        { tool_use_id: 'demo_cached_tool', tool: 'Read', input: { file_path: 'CACHED_CHAT_CONTEXT_0.ts' } },
+      ] }] }
+      const calls = engineBeneath(on, {}, options)
+      let restore = false
+      let original: QaEntry | undefined
+      on('state.set', { plugin: 'qa-guide', key: 'entries' }, (_$, e, next) => {
+        if (restore) {
+          restore = false
+          return next({ ...e, value: [original!, ...e.value.filter((entry: QaEntry) => entry.id !== original!.id)].slice(0, 20) })
+        }
+        return next(e)
+      })
+      await finishTurn($, 'Should I proceed?', { turnId: 'demo-cached-0' })
+      const band = await mountBand($, surface)
+      const explained = band.press({ key: 'explain-waiting' })
+      await calls.clock.settle()
+      expect(calls.opened).toHaveLength(1)
+      expect(calls.complete).toBe(0)
+      original = calls.savedEntries[0]
+      options.messages = []
+      for (let i = 1; i < count; i++) {
+        await finishTurn($, 'Should I proceed?', { turnId: `demo-cached-${i}` })
+        await submit($, '??')
+      }
+      await calls.clock.settle()
+      expect(calls.savedEntries).toHaveLength(20)
+      // Restore the persisted entry after pruning, then finish its delayed explanation.
+      restore = true
+      await finishTurn($, 'The demo is ready.', { turnId: 'demo-cached-finished' })
+      await calls.clock.advance(1000)
+      await explained
+      await calls.clock.settle()
+      expect(calls.complete).toBe(count)
+      const prompt = calls.completePrompts[calls.completePrompts.length - 1]!
+      if (count === 20) expect(prompt).toContain('CACHED_CHAT_CONTEXT_0.ts')
+      else expect(prompt).not.toContain('CACHED_CHAT_CONTEXT_0.ts')
+      await band.unmount()
+    })
+  }
+
   test(`plain-text question band waits for an opted-in detected turn on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     const before = await mountBand($, surface)
