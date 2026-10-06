@@ -779,6 +779,7 @@ async function explainWaiting(
     return [...list.filter(x => x.id !== entry.id), used ? { ...entry, ...used } : entry].slice(-20)
   })
   if (used && settled.get(entry.id) === used) settled.delete(entry.id)
+  const runBefore = runIds.get(entry.id)
   await update($, cursor, () => 0)
   let messages: SessionMessage[] = []
   try {
@@ -796,6 +797,8 @@ async function explainWaiting(
   compactContexts.set(entry.id, buildCompactContext(messages, userPrompts, pending.text, questions, pending.lang, entry.kind))
   if (compactContexts.size > 20) compactContexts.delete(compactContexts.keys().next().value!)
   await openQuestionPane({ open: args => $.ui.open(args), scroll: args => $.ui.scroll(args) }, pending.lang)
+  // Full context, pressed while this entry was being prepared, wins over the first compact run.
+  if (runIds.get(entry.id) !== runBefore) return
   await explain($, entry.id, 'compact', compactContexts, runIds)
 }
 
@@ -809,7 +812,11 @@ export const register: Register = (on, options) => {
     if (options.chatQuestions === 'on' && e.text.trim() === '??') {
       const pending = await read($, waiting).catch(() => null)
       if (pending) {
-        if (!pending.entryId) await explainWaiting($, pending, compactContexts, runIds, settled)
+        try {
+          if (!pending.entryId) await explainWaiting($, pending, compactContexts, runIds, settled)
+        } catch {
+          // Even when the explanation fails, ?? stays local.
+        }
         return { drop: t(pending.lang, 'waitingDropped') }
       }
     }
@@ -823,7 +830,7 @@ export const register: Register = (on, options) => {
     }
     const asked = await read($, waiting).catch(() => null)
     const ran = await next(e)
-    if (!('drop' in ran)) {
+    if (!('drop' in ran && ran.drop !== undefined)) {
       try {
         if ((e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk') &&
           (e.text.trim() || e.attachments?.length)) {

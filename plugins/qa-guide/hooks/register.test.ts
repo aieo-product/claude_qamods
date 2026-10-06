@@ -120,6 +120,8 @@ type EngineOptions = {
   promptDrop?: string
   promptRewrite?: string
   firstOpenDelay?: number
+  openThrows?: boolean
+  promptDropUndefined?: boolean
   agentMessages?: SessionMessage[]
   response?: string
   messages?: SessionMessage[]
@@ -243,6 +245,7 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
   })
   on('ui.open', async (_$, e) => {
     calls.opened.push(e)
+    if (options.openThrows) throw new Error('Demo pane cannot open.')
     if (calls.opened.length === 1 && options.firstOpenDelay) await calls.clock.sleep(options.firstOpenDelay)
     return { value: options.isPlaced === false
       ? { isPlaced: false, reason: 'Terminal is narrower than 144 columns.' }
@@ -262,7 +265,8 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
     if (e.text === options.promptDrop) return { drop: 'Handled by another hook.' }
     const input = options.promptRewrite === undefined ? e : { ...e, text: options.promptRewrite }
     calls.submitted.push(input)
-    return { text: input.text, context: input.context, origin: input.origin }
+    return { text: input.text, context: input.context, origin: input.origin,
+      ...(options.promptDropUndefined ? { drop: undefined } : {}) } as never
   })
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: {}, children: [] }))
@@ -3968,6 +3972,24 @@ for (const surface of SURFACES) {
     expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'open', answers: {} })
     expect(await ui.find({ key: 'explain-waiting' })).toBeDefined()
     await ui.unmount()
+  })
+
+  test(`?? stays local when preparing the explanation fails on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, { openThrows: true })
+    await finishTurn($, 'Should I proceed?')
+    const result = await $.prompt.submit({ text: '??', origin: { kind: 'composer' }, wait: false })
+    expect(result).toHaveProperty('drop')
+    expect(calls.submitted).toEqual([])
+  })
+
+  test(`a reply whose result carries drop: undefined still answers the question on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, { promptDropUndefined: true })
+    await finishTurn($, 'Should I proceed?')
+    await submit($, '??')
+    await calls.clock.settle()
+    await submit($, 'Yes, proceed.')
+    expect(calls.savedWaiting).toBeNull()
+    expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'answered' })
   })
 
   test(`a reply sent while the explanation entry is being prepared is kept on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
