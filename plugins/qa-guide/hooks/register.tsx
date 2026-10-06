@@ -694,6 +694,9 @@ export function detectWaiting(answer: string): { question: string; options: QaOp
 
 type ChatOutcome = Pick<QaEntry, 'status' | 'answers'>
 
+/** An open dialog holds the keyboard, so the pane pins it; an open plain-text question does not. */
+const isOpenDialog = (entry: QaEntry | undefined) => entry?.status === 'open' && entry.kind !== 'chat'
+
 /**
  * Close a plain-text question's entry. The outcome is parked first, so an
  * entry that explainWaiting has claimed but not yet saved picks it up.
@@ -706,11 +709,17 @@ async function settleChat(
 ) {
   settled.set(entryId, outcome)
   if (settled.size > 20) settled.delete(settled.keys().next().value!)
-  await update($, entries, list => list.map(x => {
-    if (x.id !== entryId || x.status !== 'open') return x
-    settled.delete(entryId)
-    return { ...x, ...outcome }
-  }))
+  // update may rerun its callback, so the parked outcome is dropped only after the write.
+  let applied = false
+  await update($, entries, list => {
+    applied = false
+    return list.map(x => {
+      if (x.id !== entryId || x.status !== 'open') return x
+      applied = true
+      return { ...x, ...outcome }
+    })
+  })
+  if (applied && settled.get(entryId) === outcome) settled.delete(entryId)
 }
 
 async function explainWaiting(
@@ -749,11 +758,12 @@ async function explainWaiting(
     answers: {},
   }
   // An answer or dismissal that arrived while this entry was being prepared.
+  let used: ChatOutcome | undefined
   await update($, entries, list => {
-    const outcome = settled.get(entry.id)
-    settled.delete(entry.id)
-    return [...list.filter(x => x.id !== entry.id), outcome ? { ...entry, ...outcome } : entry].slice(-20)
+    used = settled.get(entry.id)
+    return [...list.filter(x => x.id !== entry.id), used ? { ...entry, ...used } : entry].slice(-20)
   })
+  if (used && settled.get(entry.id) === used) settled.delete(entry.id)
   await update($, cursor, () => 0)
   let messages: SessionMessage[] = []
   try {
@@ -812,7 +822,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'qa-guide' }, async $ => {
     const list = await read($, entries)
     const newest = list[list.length - 1]
-    const current = newest?.status === 'open' ? newest : list[list.length - 1 - clampCursor(await read($, cursor), list.length)]
+    const current = isOpenDialog(newest) ? newest! : list[list.length - 1 - clampCursor(await read($, cursor), list.length)]
     const lang = current ? current.lang ?? 'ja' : await resolveLang($, options.language)
     await $.ui.open({ id: PANE, title: t(lang, 'title') })
 
@@ -922,10 +932,18 @@ export const register: Register = (on, options) => {
         const found = detectWaiting(e.answer)
         const lang: Lang = /[\u3040-\u30ff]/.test(e.answer) ? 'ja'
           : options.language === 'ja' || options.language === 'en' ? options.language : 'en'
-        await update($, waiting, () => found
-          ? { id: `chat-${e.turnId}`, lang: options.language === 'ja' || options.language === 'en' ? options.language : lang,
-              question: found.question, options: found.options, text: tail(e.answer, 2500) }
-          : null)
+        const id = `chat-${e.turnId}`
+        let replaced: QaWaiting | null = null
+        await update($, waiting, w => {
+          replaced = w
+          return found
+            ? { id, lang: options.language === 'ja' || options.language === 'en' ? options.language : lang,
+                question: found.question, options: found.options, text: tail(e.answer, 2500) }
+            : null
+        })
+        // A turn the person did not start (a notification, a scheduled prompt) moved on without an answer.
+        const old = replaced as QaWaiting | null
+        if (old?.entryId && old.id !== id) await settleChat($, old.entryId, { status: 'cancelled', answers: {} }, settled)
       }
     } catch {
       // Detection is best-effort and must never hold up the turn.
@@ -984,7 +1002,7 @@ export const register: Register = (on, options) => {
     const width = Math.max(20, e.props.bodyColumns)
     const selectedCursor = clampCursor(await read($, cursor), list.length)
     const newest = list[list.length - 1]
-    const current = newest?.status === 'open' ? newest : list[list.length - 1 - selectedCursor]
+    const current = isOpenDialog(newest) ? newest! : list[list.length - 1 - selectedCursor]
     const lang = current?.lang ?? await resolveLang($, options.language)
     const sessionCost = showCost && cost.hasPricedUsage
       ? costSuffix(lang, cost.usd, cost.hasUnpricedUsage || total > cost.tokens) : ''
@@ -1081,7 +1099,7 @@ export const register: Register = (on, options) => {
     }) + (showCost ? costSuffix(lang, current.costUsd, current.costIncomplete) : '') : undefined
     const deepButton = <Button key="deep" hotkey="f" plain label={t(lang, 'deep')} onPress={() => explain($, current.id, 'full', compactContexts, runIds)} />
 
-    if (newest?.status === 'open') {
+    if (isOpenDialog(newest)) {
       const columns = Math.max(1, Math.floor(e.props.bodyColumns))
       const bodyRows = Math.max(0, Math.floor(e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 24))
       let remaining = Math.max(0, bodyRows - 1) // one header row

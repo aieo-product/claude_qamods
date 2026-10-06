@@ -3659,7 +3659,30 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  test(`a delayed explanation button press cannot revive a dismissed question on ${surface}`,{ options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`an open plain-text question keeps the scrollable full view in a small pane on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    await finishTurn($, 'Should I proceed?')
+    await submit($, '??')
+    await calls.clock.settle()
+    expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'open', explainState: 'done' })
+    const ui = await mountPane($, surface, { ...PANE_PROPS, bodyColumns: 40, scroll: { offset: 0, bodyRows: 20 } })
+    expect(await ui.find({ key: 'compact-ai' })).toBeUndefined()
+    expect(await ui.find({ key: 'deep' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test(`a later turn cancels an explained plain-text question nobody answered on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    await finishTurn($, 'Should I proceed?')
+    await submit($, '??')
+    await calls.clock.settle()
+    expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'open' })
+    await finishTurn($, 'The scheduled check finished.', { turnId: 'demo-later' })
+    expect(calls.savedWaiting).toBeNull()
+    expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'cancelled' })
+  })
+
+  test(`a delayed explanation button press cannot revive a dismissed question on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     on('ui.press', { component: 'AbovePrompt', element: 'explain-waiting' }, async (_$, e, next) => {
       await calls.clock.sleep(1000)
