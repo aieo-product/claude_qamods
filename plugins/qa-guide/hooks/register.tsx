@@ -680,9 +680,24 @@ export function detectWaiting(answer: string): { question: string; options: QaOp
   if (!last || COURTESY.test(last)) return null
   // Only the final paragraph or the line just before a trailing list counts.
   const lastLines = text.split('\n').slice(-12)
-  if (!lastLines.some(line => line.includes(last.slice(0, 20)))) return null
-  const options: QaOption[] = lastLines
-    .map(line => /^\s*(?:\d+[.)]|[-*•]|[A-Z][.)])\s+(.+)$/.exec(line)?.[1])
+  const questionLine = lastLines.map(line => line.includes(last.slice(0, 20))).lastIndexOf(true)
+  if (questionLine < 0) return null
+  const listItem = /^\s*(?:\d+[.)]|[-*•]|[A-Z][.)])\s+(.+)$/
+  const optionLines: string[] = []
+  for (let i = questionLine + 1; i < lastLines.length; i++) {
+    const line = lastLines[i]!
+    if (listItem.test(line)) optionLines.push(line)
+    else if (line.trim() && (!optionLines.length || !/^\s+\S/.test(line))) break
+  }
+  if (!optionLines.length) {
+    for (let i = questionLine - 1; i >= 0; i--) {
+      const line = lastLines[i]!
+      if (listItem.test(line)) optionLines.unshift(line)
+      else if (line.trim() && (!optionLines.length || !/^\s+\S/.test(line))) break
+    }
+  }
+  const options: QaOption[] = optionLines
+    .map(line => listItem.exec(line)?.[1])
     .filter((x): x is string => !!x)
     .slice(0, 6)
     .map(x => {
@@ -795,19 +810,35 @@ export const register: Register = (on, options) => {
       if ((e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk') &&
         e.text.trim()) {
         await update($, prompts, list => [...list, e.text.slice(0, 600)].slice(-5))
-        // The person answered a plain-text question: record the reply on its entry.
-        const pending = await read($, waiting)
-        if (pending) {
-          if (pending.entryId) {
-            await settleChat($, pending.entryId, { status: 'answered', answers: { [pending.question]: e.text } }, settled)
-          }
-          await update($, waiting, () => null)
-        }
       }
     } catch {
       // 記録に失敗しても本人のプロンプトをそのまま通す。
     }
-    return next(e)
+    const asked = await read($, waiting).catch(() => null)
+    const ran = await next(e)
+    if (!('drop' in ran)) {
+      try {
+        if ((e.origin.kind === 'composer' || e.origin.kind === 'bridge' || e.origin.kind === 'sdk') &&
+          e.text.trim()) {
+          // Only a reply that reached Claude answers a plain-text question; a
+          // question detected after this prompt was sent is left alone.
+          let answered: QaWaiting | null = null
+          await update($, waiting, w => {
+            answered = null
+            if (!w || w.id !== asked?.id) return w
+            answered = w
+            return null
+          })
+          const old = answered as QaWaiting | null
+          if (old?.entryId) {
+            await settleChat($, old.entryId, { status: 'answered', answers: { [old.question]: e.text } }, settled)
+          }
+        }
+      } catch {
+        // Answer tracking is best-effort; preserve the downstream result.
+      }
+    }
+    return ran
   })
 
   on('session.start', async ($, e, next) => {
@@ -978,8 +1009,15 @@ export const register: Register = (on, options) => {
               onPress={() => explainWaiting($, pending, compactContexts, runIds, settled)} />}
         {hint && <Text dimColor wrap="truncate-end">{t(lang, 'waitingHint')}</Text>}
         <Button key="dismiss-waiting" plain label="×" onPress={async () => {
-          await update($, waiting, () => null)
-          if (pending.entryId) await settleChat($, pending.entryId, { status: 'cancelled', answers: {} }, settled)
+          let removed: QaWaiting | null = null
+          await update($, waiting, w => {
+            removed = null
+            if (!w || w.id !== pending.id) return w
+            removed = w
+            return null
+          })
+          const old = removed as QaWaiting | null
+          if (old?.entryId) await settleChat($, old.entryId, { status: 'cancelled', answers: {} }, settled)
         }} />
       </Box>
     )
@@ -1305,9 +1343,10 @@ export const register: Register = (on, options) => {
                         {q.header && t(x.lang, 'historyHeader', { header: q.header })}
                         {q.question}
                       </Text>
-                      <Text color={x.status === 'answered' ? 'green' : 'gray'}>
+                      <Text color={x.status === 'open' ? 'yellow' : x.status === 'answered' ? 'green' : 'gray'}>
                         {t(x.lang, 'historyArrow')}
-                        {x.status === 'answered' ? oneLine(x.answers[q.question] ?? t(x.lang, 'unanswered')) : t(x.lang, 'cancelledAnswer')}
+                        {x.status === 'open' ? t(x.lang, 'awaiting') :
+                          x.status === 'answered' ? oneLine(x.answers[q.question] ?? t(x.lang, 'unanswered')) : t(x.lang, 'cancelledAnswer')}
                       </Text>
                     </Box>
                   ))}

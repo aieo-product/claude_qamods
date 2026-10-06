@@ -117,6 +117,7 @@ type EngineOptions = {
   forkDelays?: number[]
   toolError?: boolean
   toolThrows?: boolean
+  promptDrop?: string
   agentMessages?: SessionMessage[]
   response?: string
   messages?: SessionMessage[]
@@ -255,6 +256,7 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('prompt.submit', (_$, e) => {
+    if (e.text === options.promptDrop) return { drop: 'Handled by another hook.' }
     calls.submitted.push(e)
     return { text: e.text, context: e.context, origin: e.origin }
   })
@@ -3343,6 +3345,44 @@ test('detectWaiting extracts numbered and bulleted options without bold markers'
   })
 })
 
+test('detectWaiting takes options after the question without including preceding results', () => {
+  expect(detectWaiting('- Unit tests passed\n- Lint passed\nWhich database should I use?\n1. SQLite\n2. PostgreSQL')).toEqual({
+    question: 'Which database should I use?',
+    options: [{ label: 'SQLite', description: '' }, { label: 'PostgreSQL', description: '' }],
+  })
+})
+
+test('detectWaiting takes the options immediately before a final question', () => {
+  expect(detectWaiting('1. SQLite: simple\n\n  Single file storage.\n2. PostgreSQL: production-ready\n\nWhich database should I use?')).toEqual({
+    question: 'Which database should I use?',
+    options: [{ label: 'SQLite', description: 'simple' }, { label: 'PostgreSQL', description: 'production-ready' }],
+  })
+})
+
+test('detectWaiting ignores lists separated from the question by a paragraph', () => {
+  for (const text of [
+    '- Unit tests passed\n- Lint passed\n\nThe demo is ready for the next step.\n\nWhich database should I use?',
+    '1. SQLite\n2. PostgreSQL\n\n  An unrelated paragraph.\n\nWhich database should I use?',
+    'Which database should I use?\n\nThe checks are complete.\n- Unit tests passed\n- Lint passed',
+  ]) {
+    expect(detectWaiting(text)).toEqual({ question: 'Which database should I use?', options: [] })
+  }
+})
+
+test('detectWaiting keeps a single list block through blanks and indented continuations', () => {
+  expect(detectWaiting('Which database should I use?\n\n1. SQLite: simple\n  Single file storage.\n\n2. PostgreSQL: production-ready\n\nThe checks are complete.\n- Unit tests passed\n- Lint passed')).toEqual({
+    question: 'Which database should I use?',
+    options: [{ label: 'SQLite', description: 'simple' }, { label: 'PostgreSQL', description: 'production-ready' }],
+  })
+})
+
+test('detectWaiting caps the question list at six options', () => {
+  expect(detectWaiting(['Which approach do you prefer?', ...Array.from({ length: 8 }, (_, i) => `${i + 1}. Choice ${i + 1}`)].join('\n'))).toEqual({
+    question: 'Which approach do you prefer?',
+    options: Array.from({ length: 6 }, (_, i) => ({ label: `Choice ${i + 1}`, description: '' })),
+  })
+})
+
 for (const text of ['', 'The implementation is complete.', '他に何かあればお気軽にどうぞ。', 'Let me know if you need anything else!', 'Anything else?']) {
   test(`detectWaiting ignores empty, declarative and courtesy text: ${text || '(empty)'}`, () => {
     expect(detectWaiting(text)).toBeNull()
@@ -3563,6 +3603,32 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
+  for (const explained of [false, true]) {
+    test(`a dropped reply preserves the ${explained ? 'explained' : 'unexplained'} plain-text question on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+      const calls = engineBeneath(on, {}, { promptDrop: 'Use SQLite.' })
+      await finishTurn($, 'Which database do you prefer?')
+      if (explained) {
+        await submit($, '??')
+        await calls.clock.settle()
+      }
+      const pending = calls.savedWaiting
+      expect(await submit($, 'Use SQLite.')).toEqual({ drop: 'Handled by another hook.' })
+      expect(calls.submitted).toEqual([])
+      expect(calls.savedPrompts).toEqual(['Use SQLite.'])
+      expect(calls.savedWaiting).toEqual(pending)
+      if (explained) expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'open', answers: {} })
+      else expect(calls.savedEntries).toEqual([])
+      const ui = await mountBand($, surface)
+      expect(await ui.find({ key: 'dismiss-waiting' })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /Which database do you prefer/ })).toBeDefined()
+      await submit($, 'Continue safely.')
+      expect(calls.savedWaiting).toBeNull()
+      expect(calls.submitted.map(input => input.text)).toEqual(['Continue safely.'])
+      if (explained) expect(calls.savedEntries[0]).toMatchObject({ status: 'answered', answers: { 'Which database do you prefer?': 'Continue safely.' } })
+      await ui.unmount()
+    })
+  }
+
   test(`the dismiss button clears the pending plain-text question on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     await finishTurn($, 'Should I proceed?')
@@ -3633,6 +3699,107 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
+  for (const preparing of [false, true]) {
+    test(`a stale dismiss cancels an explanation ${preparing ? 'being prepared' : 'already saved'} on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+      const calls = engineBeneath(on, {})
+      let holdDismiss = false
+      let dismissHeld = false
+      let entryHeld = false
+      on('state.get', { plugin: 'qa-guide', key: 'waiting' }, async (_$, e, next) => {
+        if (holdDismiss && !dismissHeld) {
+          dismissHeld = true
+          await calls.clock.sleep(1000)
+        }
+        return next(e)
+      })
+      on('state.get', { plugin: 'qa-guide', key: 'prompts' }, async (_$, e, next) => {
+        if (preparing && !entryHeld && calls.savedWaiting?.entryId) {
+          entryHeld = true
+          await calls.clock.sleep(2000)
+        }
+        return next(e)
+      })
+      await finishTurn($, 'Should I proceed?')
+      const ui = await mountBand($, surface)
+      holdDismiss = true
+      const dismissed = ui.press({ key: 'dismiss-waiting' })
+      await calls.clock.settle()
+      expect(dismissHeld).toBe(true)
+      const explained = ui.press({ key: 'explain-waiting' })
+      await calls.clock.settle()
+      expect(calls.savedWaiting?.entryId).toBe('chat-demo-chat')
+      expect(entryHeld).toBe(preparing)
+      expect(calls.savedEntries).toHaveLength(preparing ? 0 : 1)
+      await calls.clock.advance(1000)
+      await dismissed
+      expect(calls.savedWaiting).toBeNull()
+      if (preparing) await calls.clock.advance(1000)
+      await explained
+      await calls.clock.settle()
+      expect(calls.savedEntries).toHaveLength(1)
+      expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'cancelled', answers: {}, explainState: 'done' })
+      expect(calls.complete).toBe(1)
+      expect(calls.fork).toBe(0)
+      await ui.unmount()
+    })
+  }
+
+  test(`a stale dismiss preserves a newer plain-text question on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    let holdDismiss = false
+    let held = false
+    on('state.get', { plugin: 'qa-guide', key: 'waiting' }, async (_$, e, next) => {
+      if (holdDismiss && !held) {
+        held = true
+        await calls.clock.sleep(1000)
+      }
+      return next(e)
+    })
+    await finishTurn($, 'Should I proceed?')
+    const ui = await mountBand($, surface)
+    holdDismiss = true
+    const dismissed = ui.press({ key: 'dismiss-waiting' })
+    await calls.clock.settle()
+    expect(held).toBe(true)
+    await finishTurn($, 'Which database do you prefer?', { turnId: 'demo-newer' })
+    const pending = calls.savedWaiting
+    await calls.clock.advance(1000)
+    await dismissed
+    expect(calls.savedWaiting).toEqual(pending)
+    expect(calls.savedWaiting).toMatchObject({ id: 'chat-demo-newer', question: 'Which database do you prefer?' })
+    expect(await ui.find({ key: 'explain-waiting' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Which database do you prefer/ })).toBeDefined()
+    expect(calls.savedEntries).toEqual([])
+    expect(calls.complete).toBe(0)
+    await ui.unmount()
+  })
+
+  test(`a retried dismiss preserves a newer question and leaves the original entry open on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    const newer: QaWaiting = { id: 'chat-demo-newer', lang: 'en', question: 'Which database do you prefer?', options: [], text: 'Which database do you prefer?' }
+    let replace = false
+    let retried = false
+    on('state.set', { plugin: 'qa-guide', key: 'waiting' }, async (_$, e, next) => {
+      if (replace && !retried && e.value === null) {
+        retried = true
+        const ran = await next({ ...e, value: newer })
+        return { value: { isSet: false, version: ran.value!.version } }
+      }
+      return next(e)
+    })
+    await finishTurn($, 'Should I proceed?')
+    await submit($, '??')
+    await calls.clock.settle()
+    const ui = await mountBand($, surface)
+    replace = true
+    await ui.press({ key: 'dismiss-waiting' })
+    expect(retried).toBe(true)
+    expect(calls.savedWaiting).toEqual(newer)
+    expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'open', answers: {} })
+    expect(await ui.find({ key: 'explain-waiting' })).toBeDefined()
+    await ui.unmount()
+  })
+
   test(`a reply sent while the explanation entry is being prepared is kept on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     let held = false
@@ -3670,6 +3837,26 @@ for (const surface of SURFACES) {
     expect(await ui.find({ key: 'deep' })).toBeDefined()
     await ui.unmount()
   })
+
+  for (const lang of ['en', 'ja'] as const) {
+    test(`${lang} history labels an open explained chat entry as awaiting on ${surface}`, { options: { chatQuestions: 'on', language: lang } }, async ($, on) => {
+      const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' })
+      await ask($)
+      await calls.clock.settle()
+      await finishTurn($, CHAT_QUESTIONS[lang])
+      await submit($, '??')
+      await calls.clock.settle()
+      expect(calls.savedEntries).toHaveLength(2)
+      expect(calls.savedEntries[0]).toMatchObject({ status: 'answered' })
+      expect(calls.savedEntries[1]).toMatchObject({ kind: 'chat', status: 'open' })
+      const ui = await mountPane($, surface)
+      await ui.press({ key: 'hist' })
+      expect((await ui.find({ type: 'Text', text: lang === 'en' ? /^  →  Awaiting answer $/ : /^  →  回答待ち $/ }))?.props.color).toBe('yellow')
+      expect(await ui.find({ type: 'Text', text: lang === 'en' ? /Cancelled/ : /キャンセル/ })).toBeUndefined()
+      expect(await ui.find({ type: 'Text', text: /^  → SQLite$/ })).toBeDefined()
+      await ui.unmount()
+    })
+  }
 
   test(`a later turn cancels an explained plain-text question nobody answered on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
     const calls = engineBeneath(on, {})
