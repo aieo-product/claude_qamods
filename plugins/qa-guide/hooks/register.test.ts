@@ -3409,6 +3409,19 @@ for (const surface of SURFACES) {
     })
   }
 
+  test(`plain-text question band drops the ?? hint in a narrow row on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+    engineBeneath(on, {})
+    await finishTurn($, 'Which approach do you prefer?')
+    const wide = await mountBand($, surface)
+    expect(await wide.find({ type: 'Text', text: 'or type ?? + Enter' })).toBeDefined()
+    await wide.unmount()
+    const narrow = await mountBand($, surface, { ...BAND_PROPS, bodyColumns: 90 })
+    expect(await narrow.find({ type: 'Text', text: 'or type ?? + Enter' })).toBeUndefined()
+    expect(await narrow.find({ key: 'explain-waiting' })).toBeDefined()
+    expect(await narrow.find({ key: 'dismiss-waiting' })).toBeDefined()
+    await narrow.unmount()
+  })
+
   for (const prop of ['isWorking', 'hasSurvey'] as const) {
     test(`plain-text question band yields while ${prop} on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
       const calls = engineBeneath(on, {})

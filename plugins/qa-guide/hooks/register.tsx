@@ -914,7 +914,13 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const lang = pending.lang
     const width = Math.max(20, e.props.bodyColumns)
-    const room = Math.max(10, width - 52)
+    const cells = (text: string) => [...text].reduce((n, char) => n + cellWidth(char), 0)
+    // Icon, label, button or status, ×, the gaps between them and a margin for the engine's own controls.
+    const fixed = 2 + cells(t(lang, 'waitingLabel')) + 2 +
+      (pending.entryId ? cells(t(lang, 'waitingPending')) : cells(t(lang, 'explainWaiting')) + 4) + 1 + 4 + 6
+    // The ?? hint is the first thing to go in a narrow row, so it never wraps.
+    const hint = !pending.entryId && width - fixed - cells(t(lang, 'waitingHint')) - 1 >= 16
+    const room = Math.max(10, width - fixed - (hint ? cells(t(lang, 'waitingHint')) + 1 : 0))
     return (
       <Box flexDirection="row" gap={1}>
         <Text color="yellow" bold>⏳</Text>
@@ -926,7 +932,7 @@ export const register: Register = (on, options) => {
           ? <Text dimColor>{t(lang, 'waitingPending')}</Text>
           : <Button key="explain-waiting" hotkey="e" variant="primary" label={t(lang, 'explainWaiting')}
               onPress={() => explainWaiting($, pending, compactContexts, runIds)} />}
-        {!pending.entryId && <Text dimColor>{t(lang, 'waitingHint')}</Text>}
+        {hint && <Text dimColor wrap="truncate-end">{t(lang, 'waitingHint')}</Text>}
         <Button key="dismiss-waiting" plain label="×" onPress={() => update($, waiting, () => null)} />
       </Box>
     )

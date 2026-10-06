@@ -114,7 +114,7 @@ While the question dialog is open it holds the keyboard, so the pane cannot be s
 
 Claude sometimes ends a turn with a question written in plain text. qa-guide can detect these questions with a local heuristic that uses **0 tokens**, and show a band above the prompt with the question and an **Explain** button. The feature defaults to `off`. To enable it, run `/config` → **qa-guide** → **Plain-text questions** → `on` (`chatQuestions`).
 
-![A plain-text question with an Explain button above the prompt](docs/images/chat-question.png)
+![The plain-text question band above the prompt and its explanation in the question guide pane](docs/images/chat-question.png)
 
 Request an explanation in any of these three ways:
 

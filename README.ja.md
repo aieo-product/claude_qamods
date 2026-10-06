@@ -114,7 +114,7 @@ Claude Desktop アプリでは、質問ダイアログが開いている間も**
 
 Claude が返答の末尾に、ダイアログではなく文章で質問を書くことがあります。qa-guide は **0 トークン**のローカルな判定でこれを検出し、プロンプトの上に質問文と **AI要約**ボタンを含む帯を表示できます。既定値は `off` です。有効にするには、`/config` → **qa-guide** → **Plain-text questions** → `on`（`chatQuestions`）を選びます。
 
-![文章での質問と、プロンプトの上に表示される AI要約ボタン](docs/images/chat-question-ja.png)
+![プロンプトの上の文章での質問の帯と、質問ガイドペインの AI 要約](docs/images/chat-question-ja.png)
 
 次の 3 通りの方法で解説を依頼できます。
 
