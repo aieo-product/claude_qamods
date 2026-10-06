@@ -692,11 +692,33 @@ export function detectWaiting(answer: string): { question: string; options: QaOp
   return { question: last.replace(/^[#>*\s]+/, '').slice(0, 300), options }
 }
 
+type ChatOutcome = Pick<QaEntry, 'status' | 'answers'>
+
+/**
+ * Close a plain-text question's entry. The outcome is parked first, so an
+ * entry that explainWaiting has claimed but not yet saved picks it up.
+ */
+async function settleChat(
+  $: EngineInterface,
+  entryId: string,
+  outcome: ChatOutcome,
+  settled: Map<string, ChatOutcome>,
+) {
+  settled.set(entryId, outcome)
+  if (settled.size > 20) settled.delete(settled.keys().next().value!)
+  await update($, entries, list => list.map(x => {
+    if (x.id !== entryId || x.status !== 'open') return x
+    settled.delete(entryId)
+    return { ...x, ...outcome }
+  }))
+}
+
 async function explainWaiting(
   $: EngineInterface,
   pending: QaWaiting,
   compactContexts: Map<string, string>,
   runIds: Map<string, number>,
+  settled: Map<string, ChatOutcome>,
 ) {
   // Claim the question before context reads so repeated or stale presses cannot spend twice.
   let claimed = false
@@ -726,7 +748,12 @@ async function explainWaiting(
     status: 'open',
     answers: {},
   }
-  await update($, entries, list => [...list.filter(x => x.id !== entry.id), entry].slice(-20))
+  // An answer or dismissal that arrived while this entry was being prepared.
+  await update($, entries, list => {
+    const outcome = settled.get(entry.id)
+    settled.delete(entry.id)
+    return [...list.filter(x => x.id !== entry.id), outcome ? { ...entry, ...outcome } : entry].slice(-20)
+  })
   await update($, cursor, () => 0)
   let messages: SessionMessage[] = []
   try {
@@ -743,13 +770,14 @@ async function explainWaiting(
 export const register: Register = (on, options) => {
   const compactContexts = new Map<string, string>()
   const runIds = new Map<string, number>()
+  const settled = new Map<string, ChatOutcome>()
 
   on('prompt.submit', async ($, e, next) => {
     // "??" + Enter explains the plain-text question Claude is waiting on; it never reaches the model.
     if (options.chatQuestions === 'on' && e.text.trim() === '??') {
       const pending = await read($, waiting).catch(() => null)
       if (pending) {
-        if (!pending.entryId) await explainWaiting($, pending, compactContexts, runIds)
+        if (!pending.entryId) await explainWaiting($, pending, compactContexts, runIds, settled)
         return { drop: t(pending.lang, 'waitingDropped') }
       }
     }
@@ -761,9 +789,7 @@ export const register: Register = (on, options) => {
         const pending = await read($, waiting)
         if (pending) {
           if (pending.entryId) {
-            await update($, entries, list => list.map(x => x.id === pending.entryId
-              ? { ...x, status: 'answered' as const, answers: { [x.questions[0]?.question ?? '']: e.text } }
-              : x))
+            await settleChat($, pending.entryId, { status: 'answered', answers: { [pending.question]: e.text } }, settled)
           }
           await update($, waiting, () => null)
         }
@@ -931,9 +957,12 @@ export const register: Register = (on, options) => {
         {pending.entryId
           ? <Text dimColor>{t(lang, 'waitingPending')}</Text>
           : <Button key="explain-waiting" hotkey="e" variant="primary" label={t(lang, 'explainWaiting')}
-              onPress={() => explainWaiting($, pending, compactContexts, runIds)} />}
+              onPress={() => explainWaiting($, pending, compactContexts, runIds, settled)} />}
         {hint && <Text dimColor wrap="truncate-end">{t(lang, 'waitingHint')}</Text>}
-        <Button key="dismiss-waiting" plain label="×" onPress={() => update($, waiting, () => null)} />
+        <Button key="dismiss-waiting" plain label="×" onPress={async () => {
+          await update($, waiting, () => null)
+          if (pending.entryId) await settleChat($, pending.entryId, { status: 'cancelled', answers: {} }, settled)
+        }} />
       </Box>
     )
   })

@@ -3620,7 +3620,46 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  test(`a delayed explanation button press cannot revive a dismissed question on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`dismissing an explained plain-text question cancels its entry on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    await finishTurn($, 'Should I proceed?')
+    await submit($, '??')
+    await calls.clock.settle()
+    expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'open' })
+    const ui = await mountBand($, surface)
+    await ui.press({ key: 'dismiss-waiting' })
+    expect(calls.savedWaiting).toBeNull()
+    expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'cancelled', answers: {} })
+    await ui.unmount()
+  })
+
+  test(`a reply sent while the explanation entry is being prepared is kept on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    let held = false
+    // Hold explainWaiting's first read of the recent prompts, after it claimed the question.
+    on('state.get', { plugin: 'qa-guide', key: 'prompts' }, async (_$, e, next) => {
+      if (!held && calls.savedWaiting?.entryId) {
+        held = true
+        await calls.clock.sleep(1000)
+      }
+      return next(e)
+    })
+    await finishTurn($, 'Should I proceed?')
+    const ui = await mountBand($, surface)
+    const pressed = ui.press({ key: 'explain-waiting' })
+    await calls.clock.settle()
+    expect(held).toBe(true)
+    await submit($, 'Yes, proceed.')
+    expect(calls.savedWaiting).toBeNull()
+    await calls.clock.advance(1000)
+    await pressed
+    await calls.clock.settle()
+    expect(calls.savedEntries).toHaveLength(1)
+    expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'answered', answers: { 'Should I proceed?': 'Yes, proceed.' } })
+    await ui.unmount()
+  })
+
+  test(`a delayed explanation button press cannot revive a dismissed question on ${surface}`,{ options: { chatQuestions: 'on' } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     on('ui.press', { component: 'AbovePrompt', element: 'explain-waiting' }, async (_$, e, next) => {
       await calls.clock.sleep(1000)
