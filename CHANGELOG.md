@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-06
+
+### Changed
+
+- Plain-text question detection is now on by default (`chatQuestions` defaults to `on`). Detection uses no tokens; an explanation runs only when you press **Explain** / **AI要約** or send `??`. Set `chatQuestions` to `off` in `/config` to turn it off
+
 ## [0.5.0] - 2026-10-06
 
 ### Added
@@ -80,7 +86,8 @@ All notable changes to this project are documented here. The format follows [Kee
   - `/qa-guide` command, AI explanation toggle (`a`)
 - Marketplace manifest `claude-qamods`
 
-[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/aieo-product/claude_qamods/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/aieo-product/claude_qamods/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/aieo-product/claude_qamods/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/aieo-product/claude_qamods/compare/v0.2.0...v0.3.0

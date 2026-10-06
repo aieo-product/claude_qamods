@@ -809,7 +809,7 @@ export const register: Register = (on, options) => {
 
   on('prompt.submit', async ($, e, next) => {
     // "??" + Enter explains the plain-text question Claude is waiting on; it never reaches the model.
-    if (options.chatQuestions === 'on' && e.text.trim() === '??') {
+    if (options.chatQuestions !== 'off' && e.text.trim() === '??') {
       const pending = await read($, waiting).catch(() => null)
       if (pending) {
         try {
@@ -973,7 +973,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     try {
-      if (options.chatQuestions === 'on' && !e.agentId && e.reason === 'answer' && !e.isAborted) {
+      if (options.chatQuestions !== 'off' && !e.agentId && e.reason === 'answer' && !e.isAborted) {
         const found = detectWaiting(e.answer)
         const lang: Lang = options.language === 'ja' || options.language === 'en' ? options.language
           : detectLang(found ? [{ ...found, header: '', multiSelect: false }] : [])
@@ -997,7 +997,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (options.chatQuestions !== 'on' || e.props.hasSurvey || e.props.isWorking) return next(e)
+    if (options.chatQuestions === 'off' || e.props.hasSurvey || e.props.isWorking) return next(e)
     const pending = await read($, waiting)
     if (!pending) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)

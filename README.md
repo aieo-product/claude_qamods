@@ -19,7 +19,7 @@ The first mod, **qa-guide**, opens a side pane whenever Claude asks you somethin
 - [Requirements](#requirements)
 - [Install](#install)
 - [Usage](#usage)
-- [Plain-text questions (opt-in)](#plain-text-questions-opt-in)
+- [Plain-text questions](#plain-text-questions)
 - [How it works](#how-it-works)
 - [Privacy and cost](#privacy-and-cost)
 - [Troubleshooting](#troubleshooting)
@@ -56,9 +56,9 @@ Claude's question dialog shows a question and a few short options. After a long 
 | --- | --- |
 | ![Full view with the chosen answer marked](docs/images/full-view-en.png) | ![History navigation showing question 2 of 2](docs/images/history.png) |
 
-**Plain-text questions (opt-in)**
+**Plain-text questions**
 
-- Detect questions Claude writes at the end of a reply and offer an explanation above the prompt. Detection costs no tokens; an explanation runs only when you request it. See [Plain-text questions (opt-in)](#plain-text-questions-opt-in).
+- Detect questions Claude writes at the end of a reply and offer an explanation above the prompt. Detection costs no tokens; an explanation runs only when you request it. See [Plain-text questions](#plain-text-questions).
 
 ## Requirements
 
@@ -75,7 +75,7 @@ Run these commands inside Claude Code:
 /plugin install qa-guide@claude-qamods
 ```
 
-The installer may report unset `userConfig` options. You can ignore this: `language` defaults to `auto`, `context` to `compact`, `showCost` to `on`, and `chatQuestions` to `off`. To change an option, run `/plugin configure qa-guide@claude-qamods` or use `/config`.
+The installer may report unset `userConfig` options. You can ignore this: `language` defaults to `auto`, `context` to `compact`, `showCost` to `on`, and `chatQuestions` to `on`. To change an option, run `/plugin configure qa-guide@claude-qamods` or use `/config`.
 
 To update, run `/plugin marketplace update claude-qamods` and then `/plugin update qa-guide@claude-qamods`. To remove it, run `/plugin uninstall qa-guide@claude-qamods`.
 
@@ -110,9 +110,9 @@ The `showCost` option is an `on` / `off` picker and defaults to `on`. Set it to 
 
 While the question dialog is open it holds the keyboard, so the pane cannot be scrolled. That is why the compact view is sized to fit. After you answer, the full view can be scrolled.
 
-## Plain-text questions (opt-in)
+## Plain-text questions
 
-Claude sometimes ends a turn with a question written in plain text. qa-guide can detect these questions with a local heuristic that uses **0 tokens**, and show a band above the prompt with the question and an **Explain** button. The feature defaults to `off`. To enable it, run `/config` → **qa-guide** → **Plain-text questions** → `on` (`chatQuestions`).
+Claude sometimes ends a turn with a question written in plain text. qa-guide can detect these questions with a local heuristic that uses **0 tokens**, and show a band above the prompt with the question and an **Explain** button. The feature is on by default (since v0.5.1). To turn it off, run `/config` → **qa-guide** → **Plain-text questions** → `off` (`chatQuestions`).
 
 ![The plain-text question band above the prompt and its explanation in the question guide pane](docs/images/chat-question.png)
 
@@ -124,7 +124,7 @@ Request an explanation in any of these three ways:
 
 The explanation appears in the question guide pane as an **In-text question** entry. Your next prompt is recorded as its answer and clears the band. If you answer without requesting an explanation, the band clears and no history entry is created. Click **×** to dismiss the question.
 
-Detection and the band cost **0 tokens** until you request an explanation. That request uses one compact Haiku call, just like compact explanations for dialog questions, even when `context` is set to `full`. You can choose **Full context** afterwards to regenerate it using the whole session. Detection is a heuristic: it may miss a question or mistake another line for one.
+Detection and the band cost **0 tokens** until you request an explanation. That request uses one compact Haiku call (measured at about $0.001–0.004 at API prices), just like compact explanations for dialog questions, even when `context` is set to `full`. You can choose **Full context** afterwards to regenerate it using the whole session. Detection is a heuristic: it may miss a question or mistake another line for one.
 
 ## How it works
 
@@ -134,7 +134,7 @@ qa-guide is a single hooks module, `plugins/qa-guide/hooks/register.tsx`:
 | --- | --- |
 | `prompt.submit` | Records the last 5 prompts you typed (origins `composer`, `bridge`, `sdk`), handles `??` for pending plain-text questions, and records their answers |
 | `tool.call` (`AskUserQuestion`) | Collects context, opens the pane, starts the AI explanation without blocking, then waits for the dialog and stores the answer |
-| `turn.complete` | When `chatQuestions` is `on`, checks the end of Claude's reply for a plain-text question without calling a model |
+| `turn.complete` | Unless `chatQuestions` is `off`, checks the end of Claude's reply for a plain-text question without calling a model |
 | `ui.render` (`AbovePrompt`) | Shows the question band when an opted-in plain-text question is waiting for an answer |
 | `ui.render` (`Pane`) | Draws the compact view while the question is open and the full view afterwards |
 | `session.start` / `command.run` | Registers and handles `/qa-guide` |

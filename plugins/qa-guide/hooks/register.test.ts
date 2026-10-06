@@ -3608,8 +3608,19 @@ for (const surface of SURFACES) {
     await cleared.unmount()
   })
 
-  for (const option of ['default', 'off'] as const) {
-    test(`plain-text question ${option} option leaves waiting state untouched on ${surface}`, { options: option === 'off' ? { chatQuestions: 'off' } : {} }, async ($, on) => {
+  test(`plain-text questions are detected by default on ${surface}`, { options: { language: 'en' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    await finishTurn($, 'Should I proceed?')
+    expect(calls.savedWaiting).toMatchObject({ question: 'Should I proceed?' })
+    const ui = await mountBand($, surface)
+    expect((await ui.find({ key: 'explain-waiting' }))?.props.label).toBe('Explain')
+    expect(calls.complete).toBe(0)
+    expect(calls.fork).toBe(0)
+    await ui.unmount()
+  })
+
+  for (const option of ['off'] as const) {
+    test(`plain-text question ${option} option leaves waiting state untouched on ${surface}`, { options: { chatQuestions: option } }, async ($, on) => {
       const calls = engineBeneath(on, {})
       await finishTurn($, 'Should I proceed?')
       expect(calls.waitingWrites).toBe(0)

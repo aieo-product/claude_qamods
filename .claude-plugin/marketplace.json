@@ -6,8 +6,8 @@
   "plugins": [
     {
       "name": "qa-guide",
-      "description": "Shows Claude's questions in a side pane with context, option details, an AI explanation and answer history; plain-text questions are opt-in.",
-      "version": "0.5.0",
+      "description": "Shows Claude's questions in a side pane with context, option details, an AI explanation and answer history; also explains questions Claude asks in plain text.",
+      "version": "0.5.1",
       "author": { "name": "aieo-product" },
       "source": "./plugins/qa-guide",
       "category": "productivity",
