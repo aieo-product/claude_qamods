@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-06
+
+### Added
+
+- Opt-in plain-text question detection with a question band above the prompt; `chatQuestions` defaults to `off`
+- **Explain** / **AI要約** button, `??` + Enter and the band's `e` shortcut to request one compact Haiku explanation; pending-question `??` is handled locally and never sent to Claude
+- **In-text question** / **文章での質問** history entries that record the next prompt as the answer, with measured usage and cost included in session totals
+- **×** button to dismiss a pending plain-text question
+
+### Changed
+
+- Plain-text question explanations use dedicated instructions for Claude's reply and its explicit options, including **Full context** re-runs
+- English and Japanese documentation now explains how to enable plain-text questions, request explanations and dismiss the band, with token costs and heuristic limitations
+
 ## [0.4.0] - 2026-10-05
 
 ### Added
@@ -66,7 +80,8 @@ All notable changes to this project are documented here. The format follows [Kee
   - `/qa-guide` command, AI explanation toggle (`a`)
 - Marketplace manifest `claude-qamods`
 
-[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/aieo-product/claude_qamods/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/aieo-product/claude_qamods/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/aieo-product/claude_qamods/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/aieo-product/claude_qamods/compare/v0.1.0...v0.2.0

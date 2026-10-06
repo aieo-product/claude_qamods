@@ -1,10 +1,10 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import type { ConfigRow, ModelCompleteRequest, ModelCompleteResult, ModelForkResult, ModelUsage, On, PaneOpenArgs, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionMessage, ToolCallResult, UiScrollArgs } from 'claude-code'
+import type { ConfigRow, ModelCompleteRequest, ModelCompleteResult, ModelForkResult, ModelUsage, On, PaneOpenArgs, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionMessage, ToolCallResult, TurnCompleteInput, UiScrollArgs } from 'claude-code'
 
-import { buildCompactContext, openQuestionPane } from './register'
+import { buildCompactContext, detectWaiting, openQuestionPane } from './register'
 import { estimateCost, formatCost, resolvePrice } from './pricing'
-import type { QaEntry } from '../types'
+import type { QaEntry, QaWaiting } from '../types'
 
 const SURFACES = ['terminal', 'desktop'] as const
 
@@ -90,6 +90,8 @@ type Calls = {
   submitted: PromptSubmitInput[]
   savedPrompts: string[]
   savedEntries: QaEntry[]
+  savedWaiting?: QaWaiting | null
+  waitingWrites: number
   savedUsageTotal?: number
   savedCostTotal?: { usd: number; hasPricedUsage: boolean; hasUnpricedUsage: boolean; tokens: number }
   sessionModelLookups: number
@@ -118,6 +120,7 @@ type EngineOptions = {
   agentMessages?: SessionMessage[]
   response?: string
   messages?: SessionMessage[]
+  messagesDelay?: number
   cursor?: number
   configRows?: ConfigRow[]
   configThrows?: boolean
@@ -181,6 +184,7 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
     submitted: [],
     savedPrompts: [],
     savedEntries: [],
+    waitingWrites: 0,
     toast: [],
     opened: [],
     registered: [],
@@ -200,6 +204,10 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
       if (e.key === 'usageTotal') calls.savedUsageTotal = e.value
       if (e.key === 'costTotal') calls.savedCostTotal = e.value
       if (e.key === 'cursor') calls.savedCursor = e.value
+      if (e.key === 'waiting') {
+        calls.savedWaiting = e.value
+        calls.waitingWrites += 1
+      }
     }
     return ran
   })
@@ -218,10 +226,13 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
     if (options.envThrows?.includes(e.name)) throw new Error('Demo locale is unavailable.')
     return { value: options.env?.[e.name] }
   })
-  on('session.messages', (_$, e) => ({ value: e.agentId && options.agentMessages ? options.agentMessages : options.messages ?? [
-    { role: 'user', text: 'Build a demo todo app', toolUses: [] },
-    { role: 'assistant', text: 'I scaffolded the app. Next I need a database.', toolUses: [] },
-  ] }))
+  on('session.messages', async (_$, e) => {
+    if (options.messagesDelay) await calls.clock.sleep(options.messagesDelay)
+    return { value: e.agentId && options.agentMessages ? options.agentMessages : options.messages ?? [
+      { role: 'user', text: 'Build a demo todo app', toolUses: [] },
+      { role: 'assistant', text: 'I scaffolded the app. Next I need a database.', toolUses: [] },
+    ] }
+  })
   on('session.model', () => {
     calls.sessionModelLookups += 1
     if (options.modelThrows) throw new Error('Demo session model is unavailable.')
@@ -247,6 +258,8 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
     calls.submitted.push(e)
     return { text: e.text, context: e.context, origin: e.origin }
   })
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: {}, children: [] }))
   on('model.complete', async (_$, e) => {
     calls.complete += 1
     calls.completePrompts.push(e.prompt)
@@ -309,6 +322,23 @@ const mountPane = ($: Engine, surface: (typeof SURFACES)[number], props = PANE_P
     requestId: 'qa-guide',
     props,
   })
+
+const BAND_PROPS: RenderPropsOf['AbovePrompt'] = {
+  hasSurvey: false,
+  isWorking: false,
+  maxRows: 4,
+  bodyColumns: 160,
+  scroll: { offset: 0, bodyRows: 4 },
+  view: {},
+}
+
+function mountBand($: Engine, surface: (typeof SURFACES)[number], props = BAND_PROPS) {
+  return $.ui.mount({ plugin: 'qa-guide', surface, component: 'AbovePrompt', props })
+}
+
+function finishTurn($: Engine, answer: string, fields: Partial<TurnCompleteInput> = {}) {
+  return $.turn.complete({ turnId: 'demo-chat', answer, durationMs: 10, isAborted: false, reason: 'answer', ...fields } as TurnCompleteInput)
+}
 
 const COMPACT_QUESTIONS: Questions = Array.from({ length: 3 }, (_, qi) => ({
   question: `Question ${qi + 1}: ${'Explain the preferred approach and its tradeoffs. '.repeat(4)}`,
@@ -3295,3 +3325,354 @@ test('compact context keeps every question and option label when previews are hu
     expect(prompt).toContain(text)
   }
 })
+
+for (const question of ['どちらにしますか？', '進めてもよろしいですか', 'Should I proceed?', 'Which approach do you prefer?']) {
+  test(`detectWaiting recognizes the final question: ${question}`, () => {
+    expect(detectWaiting(`I have finished the preparation.\n${question}`)).toEqual({ question, options: [] })
+  })
+}
+
+test('detectWaiting extracts numbered and bulleted options without bold markers', () => {
+  expect(detectWaiting('Which database do you prefer?\n1. **SQLite**: simple\n2. PostgreSQL: production-ready')).toEqual({
+    question: 'Which database do you prefer?',
+    options: [{ label: 'SQLite', description: 'simple' }, { label: 'PostgreSQL', description: 'production-ready' }],
+  })
+  expect(detectWaiting('Which approach do you prefer?\n- **A** — fast\n- **B** — thorough')).toEqual({
+    question: 'Which approach do you prefer?',
+    options: [{ label: 'A', description: 'fast' }, { label: 'B', description: 'thorough' }],
+  })
+})
+
+for (const text of ['', 'The implementation is complete.', '他に何かあればお気軽にどうぞ。', 'Let me know if you need anything else!', 'Anything else?']) {
+  test(`detectWaiting ignores empty, declarative and courtesy text: ${text || '(empty)'}`, () => {
+    expect(detectWaiting(text)).toBeNull()
+  })
+}
+
+test('detectWaiting ignores a question followed by more than twelve non-question lines', () => {
+  expect(detectWaiting(['Which approach do you prefer?', ...Array.from({ length: 15 }, (_, i) => `Completed detail ${i + 1}.`)].join('\n'))).toBeNull()
+})
+
+const CHAT_QUESTIONS = {
+  en: 'Which database do you prefer?\n1. SQLite: simple\n2. PostgreSQL: production-ready',
+  ja: 'どちらにしますか？\n1. SQLite: 手軽\n2. PostgreSQL: 本番向け',
+}
+
+const CHAT_SECTIONS = {
+  en: ['### Current instructions', '### Why Claude is asking', '### Options Claude offered', '### Recommendation'],
+  ja: ['### いまの指示（概要）', '### なぜ聞いているか', '### Claude が示した選択肢', '### おすすめ'],
+}
+
+function expectChatInstructions(prompt: string, lang: 'en' | 'ja') {
+  for (const section of CHAT_SECTIONS[lang]) expect(prompt).toContain(section)
+  for (let i = 1; i < CHAT_SECTIONS[lang].length; i++) {
+    expect(prompt.indexOf(CHAT_SECTIONS[lang][i - 1]!)).toBeLessThan(prompt.indexOf(CHAT_SECTIONS[lang][i]!))
+  }
+  expect(prompt).not.toContain('AskUserQuestion')
+}
+
+for (const surface of SURFACES) {
+  test(`plain-text question band waits for an opted-in detected turn on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    const before = await mountBand($, surface)
+    expect(await before.find({ key: 'explain-waiting' })).toBeUndefined()
+    await before.unmount()
+    await finishTurn($, 'Which approach do you prefer?')
+    expect(calls.savedWaiting).toMatchObject({ id: 'chat-demo-chat', question: 'Which approach do you prefer?', lang: 'en' })
+    expect(calls.savedEntries).toEqual([])
+    expect(calls.complete).toBe(0)
+    expect(calls.fork).toBe(0)
+    const ui = await mountBand($, surface)
+    expect(await ui.find({ type: 'Text', text: /Which approach do you prefer/ })).toBeDefined()
+    expect((await ui.find({ key: 'explain-waiting' }))?.props).toMatchObject({ label: 'Explain', hotkey: 'e' })
+    expect((await ui.find({ key: 'dismiss-waiting' }))?.props.label).toBe('×')
+    await ui.unmount()
+    await finishTurn($, 'The demo is ready.')
+    expect(calls.savedWaiting).toBeNull()
+    const cleared = await mountBand($, surface)
+    expect(await cleared.find({ key: 'explain-waiting' })).toBeUndefined()
+    await cleared.unmount()
+  })
+
+  for (const option of ['default', 'off'] as const) {
+    test(`plain-text question ${option} option leaves waiting state untouched on ${surface}`, { options: option === 'off' ? { chatQuestions: 'off' } : {} }, async ($, on) => {
+      const calls = engineBeneath(on, {})
+      await finishTurn($, 'Should I proceed?')
+      expect(calls.waitingWrites).toBe(0)
+      expect(calls.savedWaiting).toBeUndefined()
+      const ui = await mountBand($, surface)
+      expect(await ui.find({ key: 'explain-waiting' })).toBeUndefined()
+      expect(await ui.find({ key: 'dismiss-waiting' })).toBeUndefined()
+      expect(calls.complete).toBe(0)
+      expect(calls.fork).toBe(0)
+      await ui.unmount()
+    })
+  }
+
+  for (const prop of ['isWorking', 'hasSurvey'] as const) {
+    test(`plain-text question band yields while ${prop} on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+      const calls = engineBeneath(on, {})
+      await finishTurn($, 'Should I proceed?')
+      const ui = await mountBand($, surface, { ...BAND_PROPS, [prop]: true })
+      expect(await ui.find({ key: 'explain-waiting' })).toBeUndefined()
+      expect(await ui.find({ key: 'dismiss-waiting' })).toBeUndefined()
+      expect(calls.savedWaiting?.question).toBe('Should I proceed?')
+      await ui.unmount()
+    })
+  }
+
+  for (const { name, fields } of [
+    { name: 'subagent', fields: { agentId: 'demo-agent' } },
+    { name: 'isAborted', fields: { isAborted: true } },
+    { name: 'aborted', fields: { reason: 'aborted', isAborted: true } },
+    { name: 'error', fields: { reason: 'error' } },
+    { name: 'refusal', fields: { reason: 'refusal', refusal: { category: 'demo', explanation: 'Refused.' } } },
+  ] as const) {
+    test(`plain-text detection excludes ${name} turns on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+      const calls = engineBeneath(on, {})
+      await finishTurn($, 'Should I proceed?', fields)
+      expect(calls.waitingWrites).toBe(0)
+      expect(calls.savedWaiting).toBeUndefined()
+      const ui = await mountBand($, surface)
+      expect(await ui.find({ key: 'explain-waiting' })).toBeUndefined()
+      expect(calls.complete).toBe(0)
+      expect(calls.fork).toBe(0)
+      await ui.unmount()
+    })
+  }
+
+  for (const lang of ['en', 'ja'] as const) {
+    for (const trigger of ['button', '??'] as const) {
+      test(`${lang} plain-text ${trigger} explanation uses one compact Haiku request on ${surface}`, { options: { chatQuestions: 'on', language: lang, context: 'full' } }, async ($, on) => {
+        const calls = engineBeneath(on, {}, { completeReply: { ...EXPLANATION, usage: MEASURED_USAGE } })
+        await submit($, 'Build a demo todo app.')
+        await finishTurn($, CHAT_QUESTIONS[lang])
+        const ui = await mountBand($, surface)
+        expect((await ui.find({ key: 'explain-waiting' }))?.props.label).toBe(lang === 'en' ? 'Explain' : 'AI要約')
+        if (trigger === 'button') await ui.press({ key: 'explain-waiting' })
+        else {
+          const result = await submit($, '??')
+          expect(result).toEqual({ drop: lang === 'en'
+            ? 'qa-guide: explaining the question in the question guide (?? was not sent to Claude)'
+            : 'qa-guide: 質問ガイドに AI 要約を表示しています（?? は Claude に送っていません）' })
+        }
+        await calls.clock.settle()
+        expect(calls.complete).toBe(1)
+        expect(calls.completeRequests).toHaveLength(1)
+        expect(calls.completeRequests[0]).toMatchObject({ model: 'haiku', maxTokens: 1500 })
+        expect(calls.fork).toBe(0)
+        expect(calls.submitted.map(input => input.text)).toEqual(['Build a demo todo app.'])
+        expectChatInstructions(calls.completePrompts[0]!, lang)
+        expect(calls.completePrompts[0]).toContain(CHAT_QUESTIONS[lang])
+        expect(calls.completePrompts[0]!.length).toBeLessThanOrEqual(12000)
+        expect(calls.savedEntries).toHaveLength(1)
+        expect(calls.savedEntries[0]).toMatchObject({
+          id: 'chat-demo-chat', kind: 'chat', lang, lead: CHAT_QUESTIONS[lang],
+          explainMode: 'compact', explainState: 'done', status: 'open',
+          usage: MEASURED_USAGE, usageModel: 'haiku', usageModelId: 'claude-haiku-4-5',
+          userPrompts: ['Build a demo todo app.'], answers: {},
+          questions: [{ header: lang === 'en' ? 'In-text question' : '文章での質問', options: [{ label: 'SQLite' }, { label: 'PostgreSQL' }] }],
+        })
+        expect(calls.savedWaiting?.entryId).toBe('chat-demo-chat')
+        expect(calls.savedUsageTotal).toBe(2752)
+        expectCost(calls.savedEntries[0]?.costUsd, 0.0052)
+        expectCost(calls.savedCostTotal?.usd, 0.0052)
+        expect(calls.savedCostTotal).toMatchObject({ tokens: 2752, hasPricedUsage: true, hasUnpricedUsage: false })
+        expect(calls.opened).toEqual([{ id: 'qa-guide', title: lang === 'en' ? 'Question guide' : '質問ガイド' }])
+        const repeated = await submit($, '??')
+        expect(repeated).toHaveProperty('drop')
+        expect(calls.submitted.map(input => input.text)).toEqual(['Build a demo todo app.'])
+        expect(calls.complete).toBe(1)
+        expect(calls.fork).toBe(0)
+        expect(calls.savedEntries).toHaveLength(1)
+        expect(calls.savedEntries[0]).toMatchObject({ status: 'open', answers: {} })
+        await submit($, 'Use SQLite.')
+        const pane = await mountPane($, surface, { ...PANE_PROPS, bodyColumns: 200 })
+        expect(await pane.find({ type: 'Text', text: lang === 'en' ? /In-text question/ : /文章での質問/ })).toBeDefined()
+        expect(await pane.find({ type: 'Text', text: USAGE_LINE[lang] + 'haiku' + COST_SUFFIX[lang]('$0.0052') })).toBeDefined()
+        expect(await pane.find({ type: 'Text', text: sessionTokenLine(lang, '2.8k') + COST_SUFFIX[lang]('$0.0052') })).toBeDefined()
+        await pane.unmount()
+        await ui.unmount()
+      })
+    }
+
+    test(`${lang} Full context on a chat entry keeps plain-text instructions on ${surface}`, { options: { chatQuestions: 'on', language: lang } }, async ($, on) => {
+      const calls = engineBeneath(on, {}, {
+        sessionModel: 'claude-opus-5-5', completeReply: { ...EXPLANATION, usage: MEASURED_USAGE }, forkReply: { ...EXPLANATION, text: 'FULL_CHAT_DEMO', usage: SESSION_USAGE },
+      })
+      await finishTurn($, CHAT_QUESTIONS[lang])
+      await submit($, '??')
+      await calls.clock.settle()
+      const ui = await mountPane($, surface)
+      await ui.press({ key: 'deep' })
+      await calls.clock.settle()
+      expect(calls.complete).toBe(1)
+      expect(calls.fork).toBe(1)
+      expectChatInstructions(calls.forkPrompts[0]!, lang)
+      expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', explainMode: 'full', explanation: 'FULL_CHAT_DEMO', usage: SESSION_USAGE, usageModel: 'session' })
+      expect(calls.savedUsageTotal).toBe(18400)
+      expectCost(calls.savedEntries[0]?.costUsd, 0.01172)
+      expectCost(calls.savedCostTotal?.usd, 0.01692)
+      expect(calls.savedCostTotal).toMatchObject({ tokens: 18400, hasPricedUsage: true, hasUnpricedUsage: false })
+      await ui.unmount()
+    })
+  }
+
+  test(`the next normal prompt answers an explained chat entry and clears the band on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    await finishTurn($, 'Which approach do you prefer?')
+    await submit($, '??')
+    await calls.clock.settle()
+    const input: PromptSubmitInput = { text: 'Use the simple approach. ' + 'Keep this detail. '.repeat(45), origin: { kind: 'composer' }, wait: false }
+    expect(input.text.length).toBeGreaterThan(600)
+    expect(await $.prompt.submit(input)).toEqual({ text: input.text, context: input.context, origin: input.origin })
+    expect(calls.submitted).toEqual([input])
+    expect(calls.savedEntries).toHaveLength(1)
+    expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'answered', answers: { 'Which approach do you prefer?': input.text } })
+    expect(calls.savedPrompts).toEqual([input.text.slice(0, 600)])
+    expect(calls.savedWaiting).toBeNull()
+    const ui = await mountBand($, surface)
+    expect(await ui.find({ key: 'explain-waiting' })).toBeUndefined()
+    expect(await ui.find({ key: 'dismiss-waiting' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test(`a reply without an explanation clears the pending question without an entry on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    await finishTurn($, 'Should I proceed?')
+    await submit($, 'Yes, proceed.')
+    expect(calls.savedWaiting).toBeNull()
+    expect(calls.savedEntries).toEqual([])
+    expect(calls.complete).toBe(0)
+    expect(calls.fork).toBe(0)
+    const ui = await mountBand($, surface)
+    expect(await ui.find({ key: 'explain-waiting' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test(`the dismiss button clears the pending plain-text question on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    await finishTurn($, 'Should I proceed?')
+    const ui = await mountBand($, surface)
+    expect((await ui.find({ key: 'dismiss-waiting' }))?.props.label).toBe('×')
+    await ui.press({ key: 'dismiss-waiting' })
+    expect(calls.savedWaiting).toBeNull()
+    expect(await ui.find({ key: 'explain-waiting' })).toBeUndefined()
+    expect(await ui.find({ key: 'dismiss-waiting' })).toBeUndefined()
+    expect(calls.savedEntries).toEqual([])
+    expect(calls.complete).toBe(0)
+    expect(calls.fork).toBe(0)
+    await ui.unmount()
+  })
+
+  test(`a reply during slow plain-text context setup remains answered after explanation on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, { messagesDelay: 1000 })
+    await finishTurn($, 'Should I proceed?')
+    const ui = await mountBand($, surface)
+    const explained = ui.press({ key: 'explain-waiting' })
+    await calls.clock.settle()
+    expect(calls.savedEntries).toHaveLength(1)
+    expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'open', explainState: 'pending' })
+    expect(calls.complete).toBe(0)
+    const input: PromptSubmitInput = { text: 'Yes, proceed.', origin: { kind: 'composer' }, wait: false }
+    expect(await $.prompt.submit(input)).toEqual({ text: input.text, context: input.context, origin: input.origin })
+    expect(calls.submitted).toEqual([input])
+    expect(calls.savedWaiting).toBeNull()
+    expect(calls.savedEntries[0]).toMatchObject({ status: 'answered', answers: { 'Should I proceed?': input.text } })
+    expect(await ui.find({ key: 'explain-waiting' })).toBeUndefined()
+    await calls.clock.advance(1000)
+    await explained
+    await calls.clock.settle()
+    expect(calls.savedEntries).toHaveLength(1)
+    expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'answered', explainState: 'done', answers: { 'Should I proceed?': input.text } })
+    expect(calls.savedWaiting).toBeNull()
+    expect(calls.complete).toBe(1)
+    expect(calls.fork).toBe(0)
+    await ui.unmount()
+  })
+
+  test(`concurrent plain-text explanation button presses create one request on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {}, { completeDelay: 1000 })
+    await finishTurn($, 'Should I proceed?')
+    const ui = await mountBand($, surface)
+    const first = ui.press({ key: 'explain-waiting' })
+    const second = ui.press({ key: 'explain-waiting' })
+    await calls.clock.settle()
+    expect(calls.complete).toBe(1)
+    expect(calls.fork).toBe(0)
+    expect(calls.savedEntries).toHaveLength(1)
+    await calls.clock.advance(1000)
+    await Promise.all([first, second])
+    expect(calls.savedUsageTotal).toBe(2)
+    await ui.unmount()
+  })
+
+  test(`a delayed explanation button press cannot revive a dismissed question on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    on('ui.press', { component: 'AbovePrompt', element: 'explain-waiting' }, async (_$, e, next) => {
+      await calls.clock.sleep(1000)
+      return next(e)
+    })
+    await finishTurn($, 'Should I proceed?')
+    const ui = await mountBand($, surface)
+    const explained = ui.press({ key: 'explain-waiting' }).then(() => '', error => String(error))
+    await calls.clock.settle()
+    await ui.press({ key: 'dismiss-waiting' })
+    await calls.clock.advance(1000)
+    expect(await explained).toContain('no handler is held under')
+    expect(calls.savedWaiting).toBeNull()
+    expect(calls.savedEntries).toEqual([])
+    expect(calls.complete).toBe(0)
+    expect(calls.fork).toBe(0)
+    await ui.unmount()
+  })
+}
+
+test('?? without a pending plain-text question passes every input field through unchanged', { options: { chatQuestions: 'on' } }, async ($, on) => {
+  const calls = engineBeneath(on, {})
+  const input: PromptSubmitInput = { text: '??', origin: { kind: 'composer' }, wait: false, context: ['Demo context.'], attachments: [{ type: 'image', mediaType: 'image/png', filename: 'demo.png' }] }
+  expect(await $.prompt.submit(input)).toEqual({ text: input.text, context: input.context, origin: input.origin })
+  expect(calls.submitted).toEqual([input])
+  expect(calls.savedEntries).toEqual([])
+  expect(calls.complete).toBe(0)
+  expect(calls.fork).toBe(0)
+})
+
+test('?? with plain-text detection off passes through even when waiting state is present', { options: { chatQuestions: 'off' } }, async ($, on) => {
+  const calls = engineBeneath(on, {})
+  on('state.get', { plugin: 'qa-guide', key: 'waiting' }, () => ({ value: { value: { id: 'demo-off', lang: 'en', question: 'Should I proceed?', options: [], text: 'Should I proceed?' }, version: 1 } }) as never)
+  const input: PromptSubmitInput = { text: '??', origin: { kind: 'composer' }, wait: false }
+  expect(await $.prompt.submit(input)).toEqual({ text: input.text, context: input.context, origin: input.origin })
+  expect(calls.submitted).toEqual([input])
+  expect(calls.savedEntries).toEqual([])
+  expect(calls.complete).toBe(0)
+  expect(calls.fork).toBe(0)
+  for (const surface of SURFACES) {
+    const ui = await mountBand($, surface)
+    expect(await ui.find({ key: 'explain-waiting' })).toBeUndefined()
+    expect(await ui.find({ key: 'dismiss-waiting' })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+for (const lang of ['en', 'ja'] as const) {
+  test(`compact chat context budgets its own ${lang} instructions and oversized questions`, () => {
+    const questions = [{ ...QUESTIONS[0]!, options: Array.from({ length: 10 }, (_, i) => ({ label: `Choice${i + 1}`, description: '\n"'.repeat(1000), preview: 'x'.repeat(20000) })) }]
+    const prompt = buildCompactContext(toolSummaryMessages(), ['\n"'.repeat(10000)], 'lead text '.repeat(1000), questions, lang, 'chat')
+    expectChatInstructions(prompt, lang)
+    expect(prompt.length).toBeLessThanOrEqual(12000)
+    for (const option of questions[0]!.options) expect(prompt).toContain(option.label)
+  })
+
+  for (const context of ['compact', 'full'] as const) {
+    test(`${lang} ${context} dialog explanation retains the existing dialog instructions`, { options: { language: lang, context } }, async ($, on) => {
+      const calls = engineBeneath(on, {})
+      await ask($)
+      await calls.clock.settle()
+      const prompt = context === 'compact' ? calls.completePrompts[0] : calls.forkPrompts[0]
+      expect(prompt).toContain('AskUserQuestion')
+      expect(prompt).toContain(lang === 'en' ? '### Effect of each option' : '### 選択肢ごとの影響')
+      expect(prompt).not.toContain(CHAT_SECTIONS[lang][2]!)
+    })
+  }
+}

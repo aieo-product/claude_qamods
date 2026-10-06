@@ -8,6 +8,17 @@ export type QaUsage = {
   cache_creation_input_tokens: number
 }
 
+/** A plain-text question Claude ended its turn with (chatQuestions option). */
+export type QaWaiting = {
+  id: string
+  lang: 'en' | 'ja'
+  question: string
+  options: QaOption[]
+  text: string
+  /** Set once the person asked for an explanation. */
+  entryId?: string
+}
+
 export type QaCostTotal = {
   usd: number
   hasPricedUsage: boolean
@@ -25,6 +36,8 @@ export type QaQuestion = {
 
 export type QaEntry = {
   id: string
+  /** 'chat' when Claude asked in plain text instead of AskUserQuestion. */
+  kind?: 'dialog' | 'chat'
   lang: 'en' | 'ja'
   askedAt: number
   userPrompts: string[]
@@ -58,6 +71,8 @@ declare module 'claude-code' {
       costTotal: QaCostTotal
       /** Index counted from the newest entry; 0 selects the latest question. */
       cursor: number
+      /** The plain-text question Claude is waiting on, if any. */
+      waiting: QaWaiting | null
     }
   }
 }

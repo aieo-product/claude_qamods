@@ -1,7 +1,7 @@
 {
   "name": "qa-guide",
-  "version": "0.4.0",
-  "description": "Shows Claude's AskUserQuestion prompts in a side pane with context, option details, an AI explanation and answer history.",
+  "version": "0.5.0",
+  "description": "Shows Claude's questions in a side pane with context, option details, an AI explanation and answer history; plain-text questions are opt-in.",
   "author": {
     "name": "aieo-product"
   },
@@ -46,6 +46,16 @@
         "full"
       ],
       "default": "compact"
+    },
+    "chatQuestions": {
+      "type": "string",
+      "title": "Plain-text questions",
+      "description": "Detect when Claude ends a turn with a question in plain text and offer an AI explanation above the prompt.",
+      "options": [
+        "off",
+        "on"
+      ],
+      "default": "off"
     }
   }
 }
