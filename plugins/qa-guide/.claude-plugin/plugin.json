@@ -1,6 +1,6 @@
 {
   "name": "qa-guide",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Shows Claude's questions in a side pane with context, option details, an AI explanation and answer history; also explains questions Claude asks in plain text.",
   "author": {
     "name": "aieo-product"

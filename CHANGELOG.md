@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-07
+
+### Added
+
+- README inside the plugin folder (`plugins/qa-guide/README.md`) for the Claude plugin directory listing, including what the mod reads, sends and stores
+
+### Changed
+
+- Requirements now say Claude Code v2.1.287 or later in the terminal and v2.1.286 or later in the Desktop app's Code tab; mods are no longer early access
+- The security policy describes the current model requests and supported versions
+
 ## [0.5.1] - 2026-10-06
 
 ### Changed
@@ -86,7 +97,8 @@ All notable changes to this project are documented here. The format follows [Kee
   - `/qa-guide` command, AI explanation toggle (`a`)
 - Marketplace manifest `claude-qamods`
 
-[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/aieo-product/claude_qamods/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/aieo-product/claude_qamods/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/aieo-product/claude_qamods/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/aieo-product/claude_qamods/compare/v0.3.0...v0.4.0

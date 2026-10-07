@@ -62,7 +62,7 @@ Claude's question dialog shows a question and a few short options. After a long 
 
 ## Requirements
 
-- **Claude Code 2.1.286 or later.** The mod uses the function-hooks plugin API, which is **early access** and may change between releases.
+- **Claude Code v2.1.287 or later** in the terminal, or the Code tab of the Claude Desktop app **v2.1.286 or later**. qa-guide is a mod, and mods are on by default in these versions.
 - A terminal, preferably in fullscreen mode. The pane opens on its own when the terminal is at least **144 columns** wide. `/qa-guide` opens it at any width.
 - The pane labels and AI explanations support **English and Japanese**. Language selection is automatic by default; see [Usage](#usage).
 
@@ -135,7 +135,7 @@ qa-guide is a single hooks module, `plugins/qa-guide/hooks/register.tsx`:
 | `prompt.submit` | Records the last 5 prompts you typed (origins `composer`, `bridge`, `sdk`), handles `??` for pending plain-text questions, and records their answers |
 | `tool.call` (`AskUserQuestion`) | Collects context, opens the pane, starts the AI explanation without blocking, then waits for the dialog and stores the answer |
 | `turn.complete` | Unless `chatQuestions` is `off`, checks the end of Claude's reply for a plain-text question without calling a model |
-| `ui.render` (`AbovePrompt`) | Shows the question band when an opted-in plain-text question is waiting for an answer |
+| `ui.render` (`AbovePrompt`) | Shows the question band while a plain-text question is waiting for an answer |
 | `ui.render` (`Pane`) | Draws the compact view while the question is open and the full view afterwards |
 | `session.start` / `command.run` | Registers and handles `/qa-guide` |
 
