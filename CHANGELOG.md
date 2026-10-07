@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-07
+
+### Added
+
+- Directory listing fields in `plugin.json`: the display name **QA Guide**, and documentation, support and privacy links
+
 ## [0.5.3] - 2026-10-07
 
 ### Added
@@ -109,7 +115,8 @@ All notable changes to this project are documented here. The format follows [Kee
   - `/qa-guide` command, AI explanation toggle (`a`)
 - Marketplace manifest `claude-qamods`
 
-[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/aieo-product/claude_qamods/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/aieo-product/claude_qamods/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/aieo-product/claude_qamods/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/aieo-product/claude_qamods/compare/v0.5.0...v0.5.1

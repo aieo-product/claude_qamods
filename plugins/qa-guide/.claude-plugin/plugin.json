@@ -1,12 +1,16 @@
 {
   "name": "qa-guide",
-  "version": "0.5.3",
+  "displayName": "QA Guide",
+  "version": "0.5.4",
   "description": "Shows Claude's questions in a side pane with context, option details, an AI explanation and answer history; also explains questions Claude asks in plain text.",
   "author": {
     "name": "aieo-product"
   },
   "repository": "https://github.com/aieo-product/claude_qamods",
   "homepage": "https://github.com/aieo-product/claude_qamods#readme",
+  "documentationUrl": "https://github.com/aieo-product/claude_qamods/tree/main/plugins/qa-guide#readme",
+  "supportUrl": "https://github.com/aieo-product/claude_qamods/issues",
+  "privacyPolicyUrl": "https://github.com/aieo-product/claude_qamods/tree/main/plugins/qa-guide#what-it-reads-sends-and-stores",
   "license": "MIT",
   "keywords": [
     "askuserquestion",
