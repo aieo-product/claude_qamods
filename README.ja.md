@@ -77,7 +77,7 @@ Claude Code の中で次の 2 つを実行します。
 
 ![要点のみで作った解説と「全文脈で解説」ボタン](docs/images/compact-context.png)
 
-インストール時に未設定の `userConfig` オプションがあると表示されることがありますが、対応は不要です。既定値は `language` が `auto`、`context` が `compact`、`showCost` が `on`、`chatQuestions` が `on` です。変更する場合は、`/plugin configure qa-guide@claude-qamods` か `/config` で設定してください。
+インストール時に未設定の `userConfig` オプションがあると表示されることがありますが、対応は不要です。既定値は `language` が `auto`、`context` が `compact`、`priceEstimate` と `plainTextQuestions` が ON です。`language` と `context` は文字で入力し、`priceEstimate` と `plainTextQuestions` は ON/OFF の切り替えです。変更する場合は、`/plugin configure qa-guide@claude-qamods` か `/config` で設定してください。
 
 更新は `/plugin marketplace update claude-qamods` のあとに `/plugin update qa-guide@claude-qamods`、アンインストールは `/plugin uninstall qa-guide@claude-qamods` です。
 
@@ -95,7 +95,7 @@ Claude が質問すると、ダイアログの横にペインが開きます。�
 
 Claude Desktop アプリでは、質問ダイアログが開いている間も**全文脈で解説**ボタンをクリックできます。
 
-`showCost` は `on` / `off` の選択式で、既定値は `on` です。`/config` または `/plugin configure qa-guide@claude-qamods` で `off` にすると、API 料金の換算額を隠して実測トークン数だけを表示します。
+`priceEstimate`（**API price estimate**）は ON/OFF の切り替えで、既定は ON です。`/config` または `/plugin configure qa-guide@claude-qamods` で OFF にすると、API 料金の換算額を隠して実測トークン数だけを表示します。
 
 | 操作 | 場所 | 動作 |
 | --- | --- | --- |
@@ -112,7 +112,7 @@ Claude Desktop アプリでは、質問ダイアログが開いている間も**
 
 ## 文章での質問
 
-Claude が返答の末尾に、ダイアログではなく文章で質問を書くことがあります。qa-guide は **0 トークン**のローカルな判定でこれを検出し、プロンプトの上に質問文と **AI要約**ボタンを含む帯を表示できます。v0.5.1 から既定で有効です。無効にするには、`/config` → **qa-guide** → **Plain-text questions** → `off`（`chatQuestions`）を選びます。
+Claude が返答の末尾に、ダイアログではなく文章で質問を書くことがあります。qa-guide は **0 トークン**のローカルな判定でこれを検出し、プロンプトの上に質問文と **AI要約**ボタンを含む帯を表示できます。v0.5.1 から既定で有効です。無効にするには、`/config` → **qa-guide** → **Plain-text questions** を OFF にします（`plainTextQuestions`）。
 
 ![プロンプトの上の文章での質問の帯と、質問ガイドペインの AI 要約](docs/images/chat-question-ja.png)
 
@@ -134,7 +134,7 @@ qa-guide は 1 つの hooks module（`plugins/qa-guide/hooks/register.tsx`）で
 | --- | --- |
 | `prompt.submit` | あなたが入力した直近 5 件のプロンプトを記録する（origin が `composer`・`bridge`・`sdk` のもの）。保留中の文章での質問への `??` と回答も処理する |
 | `tool.call`（`AskUserQuestion`） | 文脈を集めてペインを開き、AI 解説の生成を回答を待たせない形で始め、ダイアログの回答を待って保存する |
-| `turn.complete` | `chatQuestions` が `off` でなければ、モデルを呼ばずに Claude の返答末尾の文章での質問を検出する |
+| `turn.complete` | `plainTextQuestions` が OFF でなければ、モデルを呼ばずに Claude の返答末尾の文章での質問を検出する |
 | `ui.render`（`AbovePrompt`） | 文章での質問が有効で、回答待ちの質問があるときに帯を表示する |
 | `ui.render`（`Pane`） | 質問中はコンパクト表示、回答後は全文表示を描く |
 | `session.start` / `command.run` | `/qa-guide` を登録して処理する |

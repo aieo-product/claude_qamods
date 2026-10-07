@@ -236,6 +236,15 @@ export function detectLang(questions: QaQuestion[]): Lang {
     q.options.some(o => /[぀-ヿ]/.test(o.label))) ? 'ja' : 'en'
 }
 
+/**
+ * userConfig values. The on/off settings are booleans since v0.5.3, under new
+ * keys (priceEstimate, plainTextQuestions): a string saved under the old keys
+ * (showCost, chatQuestions) would not fit a boolean and would keep the mod from
+ * loading, so those old values are left unused. language and context are free text.
+ */
+const optionText = (value: unknown) => typeof value === 'string' ? value.trim().toLowerCase() : ''
+const isOff = (value: unknown) => value === false
+
 async function resolveLang($: EngineInterface, preference: unknown, questions?: QaQuestion[]): Promise<Lang> {
   if (preference === 'en' || preference === 'ja') return preference
   if (questions?.length) return detectLang(questions)
@@ -809,7 +818,7 @@ export const register: Register = (on, options) => {
 
   on('prompt.submit', async ($, e, next) => {
     // "??" + Enter explains the plain-text question Claude is waiting on; it never reaches the model.
-    if (options.chatQuestions !== 'off' && e.text.trim() === '??') {
+    if (!isOff(options.plainTextQuestions) && e.text.trim() === '??') {
       const pending = await read($, waiting).catch(() => null)
       if (pending) {
         try {
@@ -858,7 +867,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'qa-guide',
-      description: t(await resolveLang($, options.language), 'commandDescription'),
+      description: t(await resolveLang($, optionText(options.language)), 'commandDescription'),
     })
 
     return next(e)
@@ -868,7 +877,7 @@ export const register: Register = (on, options) => {
     const list = await read($, entries)
     const openDialog = [...list].reverse().find(isOpenDialog)
     const current = openDialog ?? list[list.length - 1 - clampCursor(await read($, cursor), list.length)]
-    const lang = current ? current.lang ?? 'ja' : await resolveLang($, options.language)
+    const lang = current ? current.lang ?? 'ja' : await resolveLang($, optionText(options.language))
     await $.ui.open({ id: PANE, title: t(lang, 'title') })
 
     return { text: t(lang, 'commandOpened') }
@@ -877,7 +886,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
     const id = e.tool_use_id ?? `qa-${await $.clock.now()}`
     const questions = toQuestions(e.questions)
-    const lang = await resolveLang($, options.language, questions)
+    const lang = await resolveLang($, optionText(options.language), questions)
 
     // 本人の最近の指示と、最後の指示の後の Claude の説明文を拾う。
     const userPrompts = (await read($, prompts)).slice(-3)
@@ -907,7 +916,7 @@ export const register: Register = (on, options) => {
     }
 
     const aiOn = await read($, isAiOn)
-    const mode = options.context === 'full' ? 'full' : 'compact'
+    const mode = optionText(options.context) === 'full' ? 'full' : 'compact'
     const entry: QaEntry = {
       id,
       lang,
@@ -973,9 +982,10 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     try {
-      if (options.chatQuestions !== 'off' && !e.agentId && e.reason === 'answer' && !e.isAborted) {
+      if (!isOff(options.plainTextQuestions) && !e.agentId && e.reason === 'answer' && !e.isAborted) {
         const found = detectWaiting(e.answer)
-        const lang: Lang = options.language === 'ja' || options.language === 'en' ? options.language
+        const preference = optionText(options.language)
+        const lang: Lang = preference === 'ja' || preference === 'en' ? preference
           : detectLang(found ? [{ ...found, header: '', multiSelect: false }] : [])
         const id = `chat-${e.turnId}`
         let replaced: QaWaiting | null = null
@@ -997,7 +1007,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (options.chatQuestions === 'off' || e.props.hasSurvey || e.props.isWorking) return next(e)
+    if (isOff(options.plainTextQuestions) || e.props.hasSurvey || e.props.isWorking) return next(e)
     const pending = await read($, waiting)
     if (!pending) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -1050,12 +1060,12 @@ export const register: Register = (on, options) => {
     const history = await read($, showHistory)
     const total = await read($, usageTotal)
     const cost = await read($, costTotal)
-    const showCost = options.showCost !== 'off'
+    const showCost = !isOff(options.priceEstimate)
     const width = Math.max(20, e.props.bodyColumns)
     const selectedCursor = clampCursor(await read($, cursor), list.length)
     const openDialog = [...list].reverse().find(isOpenDialog)
     const current = openDialog ?? list[list.length - 1 - selectedCursor]
-    const lang = current?.lang ?? await resolveLang($, options.language)
+    const lang = current?.lang ?? await resolveLang($, optionText(options.language))
     const sessionCost = showCost && cost.hasPricedUsage
       ? costSuffix(lang, cost.usd, cost.hasUnpricedUsage || total > cost.tokens) : ''
 

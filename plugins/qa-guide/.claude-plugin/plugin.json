@@ -1,6 +1,6 @@
 {
   "name": "qa-guide",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Shows Claude's questions in a side pane with context, option details, an AI explanation and answer history; also explains questions Claude asks in plain text.",
   "author": {
     "name": "aieo-product"
@@ -19,43 +19,26 @@
     "language": {
       "type": "string",
       "title": "Language",
-      "description": "Language for pane labels and AI explanations (auto detects each question).",
-      "options": [
-        "auto",
-        "en",
-        "ja"
-      ],
+      "description": "Language for pane labels and AI explanations: auto (detects each question), en or ja.",
       "default": "auto"
     },
-    "showCost": {
-      "type": "string",
+    "priceEstimate": {
+      "type": "boolean",
       "title": "API price estimate",
       "description": "Show an API-price estimate beside measured tokens (subscriptions use usage limits).",
-      "options": [
-        "on",
-        "off"
-      ],
-      "default": "on"
+      "default": true
     },
     "context": {
       "type": "string",
       "title": "Context",
-      "description": "Context for AI explanations (compact uses Haiku; full uses the whole session).",
-      "options": [
-        "compact",
-        "full"
-      ],
+      "description": "Context for AI explanations: compact (a bounded summary sent to Haiku) or full (the whole session on its model).",
       "default": "compact"
     },
-    "chatQuestions": {
-      "type": "string",
+    "plainTextQuestions": {
+      "type": "boolean",
       "title": "Plain-text questions",
       "description": "Detect when Claude ends a turn with a question in plain text and offer an AI explanation above the prompt.",
-      "options": [
-        "off",
-        "on"
-      ],
-      "default": "on"
+      "default": true
     }
   }
 }

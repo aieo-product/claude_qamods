@@ -75,7 +75,7 @@ Run these commands inside Claude Code:
 /plugin install qa-guide@claude-qamods
 ```
 
-The installer may report unset `userConfig` options. You can ignore this: `language` defaults to `auto`, `context` to `compact`, `showCost` to `on`, and `chatQuestions` to `on`. To change an option, run `/plugin configure qa-guide@claude-qamods` or use `/config`.
+The installer may report unset `userConfig` options. You can ignore this: `language` defaults to `auto`, `context` to `compact`, `priceEstimate` and `plainTextQuestions` to on. `language` and `context` are typed in; `priceEstimate` and `plainTextQuestions` are on/off toggles. To change an option, run `/plugin configure qa-guide@claude-qamods` or use `/config`.
 
 To update, run `/plugin marketplace update claude-qamods` and then `/plugin update qa-guide@claude-qamods`. To remove it, run `/plugin uninstall qa-guide@claude-qamods`.
 
@@ -95,7 +95,7 @@ The `context` option defaults to `compact`: explanations use a bounded summary a
 
 In the Claude Desktop app, the **Full context** button can be clicked while the question dialog is still open.
 
-The `showCost` option is an `on` / `off` picker and defaults to `on`. Set it to `off` in `/config` or `/plugin configure qa-guide@claude-qamods` to show measured tokens without the API-price estimate.
+The `priceEstimate` option (**API price estimate**) is an on/off toggle and defaults to on. Turn it off in `/config` or `/plugin configure qa-guide@claude-qamods` to show measured tokens without the API-price estimate.
 
 | Control | Where | Action |
 | --- | --- | --- |
@@ -112,7 +112,7 @@ While the question dialog is open it holds the keyboard, so the pane cannot be s
 
 ## Plain-text questions
 
-Claude sometimes ends a turn with a question written in plain text. qa-guide can detect these questions with a local heuristic that uses **0 tokens**, and show a band above the prompt with the question and an **Explain** button. The feature is on by default (since v0.5.1). To turn it off, run `/config` → **qa-guide** → **Plain-text questions** → `off` (`chatQuestions`).
+Claude sometimes ends a turn with a question written in plain text. qa-guide can detect these questions with a local heuristic that uses **0 tokens**, and show a band above the prompt with the question and an **Explain** button. The feature is on by default (since v0.5.1). To turn it off, run `/config` → **qa-guide** → **Plain-text questions** and turn it off (`plainTextQuestions`).
 
 ![The plain-text question band above the prompt and its explanation in the question guide pane](docs/images/chat-question.png)
 
@@ -134,7 +134,7 @@ qa-guide is a single hooks module, `plugins/qa-guide/hooks/register.tsx`:
 | --- | --- |
 | `prompt.submit` | Records the last 5 prompts you typed (origins `composer`, `bridge`, `sdk`), handles `??` for pending plain-text questions, and records their answers |
 | `tool.call` (`AskUserQuestion`) | Collects context, opens the pane, starts the AI explanation without blocking, then waits for the dialog and stores the answer |
-| `turn.complete` | Unless `chatQuestions` is `off`, checks the end of Claude's reply for a plain-text question without calling a model |
+| `turn.complete` | Unless `plainTextQuestions` is off, checks the end of Claude's reply for a plain-text question without calling a model |
 | `ui.render` (`AbovePrompt`) | Shows the question band while a plain-text question is waiting for an answer |
 | `ui.render` (`Pane`) | Draws the compact view while the question is open and the full view afterwards |
 | `session.start` / `command.run` | Registers and handles `/qa-guide` |

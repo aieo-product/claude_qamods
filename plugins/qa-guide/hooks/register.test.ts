@@ -677,7 +677,7 @@ for (const lang of ['en', 'ja'] as const) {
 
 for (const lang of ['en', 'ja'] as const) {
   for (const context of ['compact', 'full'] as const) {
-    test(`${lang} ${context} measured usage renders on both surfaces in compact and full panes`, { options: { language: lang, context, showCost: 'off' } }, async ($, on) => {
+    test(`${lang} ${context} measured usage renders on both surfaces in compact and full panes`, { options: { language: lang, context, priceEstimate: false } }, async ($, on) => {
       const reply = { ...EXPLANATION, text: 'Demo guidance.', usage: MEASURED_USAGE }
       const calls = engineBeneath(on, {}, { toolDelay: 1000, messages: [], completeReply: reply, forkReply: reply })
       const asked = ask($)
@@ -708,7 +708,7 @@ for (const lang of ['en', 'ja'] as const) {
     })
   }
 
-  test(`${lang} reruns replace entry usage while every request adds all four counts to the session`, { options: { language: lang, showCost: 'off' } }, async ($, on) => {
+  test(`${lang} reruns replace entry usage while every request adds all four counts to the session`, { options: { language: lang, priceEstimate: false } }, async ($, on) => {
     const calls = engineBeneath(on, {}, {
       completeReply: { ...EXPLANATION, usage: MEASURED_USAGE },
       forkReply: { ...EXPLANATION, usage: SESSION_USAGE },
@@ -792,7 +792,7 @@ for (const lang of ['en', 'ja'] as const) {
 
 for (const context of ['compact', 'full'] as const) {
   for (const reason of ['api-error', 'aborted', 'empty-reply'] as const) {
-    test(`${context} ${reason} results retain measured usage even without an explanation`, { options: { language: 'en', context, showCost: 'off' } }, async ($, on) => {
+    test(`${context} ${reason} results retain measured usage even without an explanation`, { options: { language: 'en', context, priceEstimate: false } }, async ($, on) => {
       const usage = context === 'full' ? SESSION_USAGE : reason === 'empty-reply' ? MEASURED_USAGE : ZERO_USAGE
       const reply: ModelCompleteResult = reason === 'api-error'
         ? { isAnswered: false, reason, status: 429, error: 'rate_limit', usage }
@@ -868,7 +868,7 @@ test('concurrent question completions each add measured usage to the session tot
 })
 
 for (const carriesUsage of [false, true]) {
-  test(`nothing-to-fork fallback records Haiku usage${carriesUsage ? ' and any carried fork usage' : ''}`, { options: { context: 'full', showCost: 'off' } }, async ($, on) => {
+  test(`nothing-to-fork fallback records Haiku usage${carriesUsage ? ' and any carried fork usage' : ''}`, { options: { context: 'full', priceEstimate: false } }, async ($, on) => {
     const forkReply: ModelForkResult = carriesUsage
       ? { isAnswered: false, reason: 'nothing-to-fork', usage: SESSION_USAGE } as ModelForkResult
       : { isAnswered: false, reason: 'nothing-to-fork' }
@@ -917,7 +917,7 @@ for (const surface of SURFACES) {
   })
 }
 
-test('measured compact usage never steals content or the Full context button from the row budget', { options: { showCost: 'off' } }, async ($, on) => {
+test('measured compact usage never steals content or the Full context button from the row budget', { options: { priceEstimate: false } }, async ($, on) => {
   const calls = engineBeneath(on, {}, {
     toolDelay: 1000, messages: [], completeReply: { ...EXPLANATION, text: 'Demo guidance.', usage: MEASURED_USAGE },
   })
@@ -1035,7 +1035,7 @@ for (const lang of ['en', 'ja'] as const) {
       }
     })
 
-    test(`${lang} showCost off keeps ${context} usage and session totals token-only on both surfaces`, { options: { language: lang, context, showCost: 'off' } }, async ($, on) => {
+    test(`${lang} showCost off keeps ${context} usage and session totals token-only on both surfaces`, { options: { language: lang, context, priceEstimate: false } }, async ($, on) => {
       const reply = { ...EXPLANATION, usage: MEASURED_USAGE }
       const calls = engineBeneath(on, {}, { completeReply: reply, forkReply: reply, sessionModel: 'claude-opus-5-5' })
       await ask($)
@@ -3421,7 +3421,7 @@ function expectChatInstructions(prompt: string, lang: 'en' | 'ja') {
 }
 
 for (const surface of SURFACES) {
-  test(`a late chat entry keeps the open dialog pinned in the pane and command on ${surface}`, { options: { chatQuestions: 'on', language: 'auto' } }, async ($, on) => {
+  test(`a late chat entry keeps the open dialog pinned in the pane and command on ${surface}`, { options: { plainTextQuestions: true, language: 'auto' } }, async ($, on) => {
     const calls = engineBeneath(on, {}, { toolDelay: 2000 })
     let held = false
     on('state.get', { plugin: 'qa-guide', key: 'prompts' }, async (_$, e, next) => {
@@ -3459,7 +3459,7 @@ for (const surface of SURFACES) {
     await Promise.all([older, pending])
   })
 
-  test(`plain-text explanation restores bounded real user instructions from an empty history on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+  test(`plain-text explanation restores bounded real user instructions from an empty history on ${surface}`, { options: { plainTextQuestions: true, language: 'en' } }, async ($, on) => {
     const humanTexts = ['Earlier demo task.', 'Build a demo task board.', 'Keep the interface minimal.', 'Use SQLite. ' + 'Keep this detail. '.repeat(45)]
     const calls = engineBeneath(on, {}, { messages: [
       { role: 'user', text: humanTexts[0]!, toolUses: [] },
@@ -3492,7 +3492,7 @@ for (const surface of SURFACES) {
     await pane.unmount()
   })
 
-  test(`an attachment-only reply answers the explained chat entry and clears the band on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+  test(`an attachment-only reply answers the explained chat entry and clears the band on ${surface}`, { options: { plainTextQuestions: true, language: 'en' } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     const question = 'Would you like to attach a screenshot?'
     await finishTurn($, question)
@@ -3515,7 +3515,7 @@ for (const surface of SURFACES) {
     { name: 'ignores unrelated kana and option descriptions', answer: `Test data includes こんにちは.\nWhich database do you prefer?\n1. SQLite: かんたん\n2. PostgreSQL: production-ready`, lang: 'en' },
     { name: 'detects kana in option labels', answer: 'Which database do you prefer?\n1. キャンバス: simple\n2. PostgreSQL: production-ready', lang: 'ja' },
   ] as const) {
-    test(`plain-text automatic language ${name} on ${surface}`, { options: { chatQuestions: 'on', language: 'auto' } }, async ($, on) => {
+    test(`plain-text automatic language ${name} on ${surface}`, { options: { plainTextQuestions: true, language: 'auto' } }, async ($, on) => {
       const calls = engineBeneath(on, {})
       await finishTurn($, answer)
       expect(calls.savedWaiting?.lang).toBe(lang)
@@ -3529,7 +3529,7 @@ for (const surface of SURFACES) {
     })
   }
 
-  test(`a downstream rewritten reply is stored as the chat answer on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`a downstream rewritten reply is stored as the chat answer on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {}, { promptRewrite: 'Use PostgreSQL.' })
     const question = 'Which database do you prefer?'
     await finishTurn($, question)
@@ -3544,7 +3544,7 @@ for (const surface of SURFACES) {
   })
 
   for (const count of [20, 21]) {
-    test(`plain-text compact contexts ${count === 20 ? 'retain 20 entries' : 'evict the oldest of 21 entries'} on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+    test(`plain-text compact contexts ${count === 20 ? 'retain 20 entries' : 'evict the oldest of 21 entries'} on ${surface}`, { options: { plainTextQuestions: true, language: 'en' } }, async ($, on) => {
       const options: EngineOptions = { firstOpenDelay: 1000, messages: [{ role: 'assistant', text: '', toolUses: [
         { tool_use_id: 'demo_cached_tool', tool: 'Read', input: { file_path: 'CACHED_CHAT_CONTEXT_0.ts' } },
       ] }] }
@@ -3586,7 +3586,7 @@ for (const surface of SURFACES) {
     })
   }
 
-  test(`plain-text question band waits for an opted-in detected turn on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+  test(`plain-text question band waits for an opted-in detected turn on ${surface}`, { options: { plainTextQuestions: true, language: 'en' } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     const before = await mountBand($, surface)
     expect(await before.find({ key: 'explain-waiting' })).toBeUndefined()
@@ -3619,8 +3619,17 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  for (const option of ['off'] as const) {
-    test(`plain-text question ${option} option leaves waiting state untouched on ${surface}`, { options: { chatQuestions: option } }, async ($, on) => {
+  test(`settings saved by v0.5.2 and earlier still load, with the new defaults on ${surface}`, { options: { chatQuestions: 'off', showCost: 'off', language: 'en' } }, async ($, on) => {
+    const calls = engineBeneath(on, {})
+    await finishTurn($, 'Should I proceed?')
+    expect(calls.savedWaiting).toMatchObject({ question: 'Should I proceed?' })
+    const ui = await mountBand($, surface)
+    expect((await ui.find({ key: 'explain-waiting' }))?.props.label).toBe('Explain')
+    await ui.unmount()
+  })
+
+  for (const [name, options] of [['off', { plainTextQuestions: false }]] as const) {
+    test(`plain-text question ${name} option leaves waiting state untouched on ${surface}`, { options }, async ($, on) => {
       const calls = engineBeneath(on, {})
       await finishTurn($, 'Should I proceed?')
       expect(calls.waitingWrites).toBe(0)
@@ -3634,7 +3643,7 @@ for (const surface of SURFACES) {
     })
   }
 
-  test(`plain-text question band drops the ?? hint in a narrow row on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+  test(`plain-text question band drops the ?? hint in a narrow row on ${surface}`, { options: { plainTextQuestions: true, language: 'en' } }, async ($, on) => {
     engineBeneath(on, {})
     await finishTurn($, 'Which approach do you prefer?')
     const wide = await mountBand($, surface)
@@ -3648,7 +3657,7 @@ for (const surface of SURFACES) {
   })
 
   for (const prop of ['isWorking', 'hasSurvey'] as const) {
-    test(`plain-text question band yields while ${prop} on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    test(`plain-text question band yields while ${prop} on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
       const calls = engineBeneath(on, {})
       await finishTurn($, 'Should I proceed?')
       const ui = await mountBand($, surface, { ...BAND_PROPS, [prop]: true })
@@ -3666,7 +3675,7 @@ for (const surface of SURFACES) {
     { name: 'error', fields: { reason: 'error' } },
     { name: 'refusal', fields: { reason: 'refusal', refusal: { category: 'demo', explanation: 'Refused.' } } },
   ] as const) {
-    test(`plain-text detection excludes ${name} turns on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    test(`plain-text detection excludes ${name} turns on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
       const calls = engineBeneath(on, {})
       await finishTurn($, 'Should I proceed?', fields)
       expect(calls.waitingWrites).toBe(0)
@@ -3681,7 +3690,7 @@ for (const surface of SURFACES) {
 
   for (const lang of ['en', 'ja'] as const) {
     for (const trigger of ['button', '??'] as const) {
-      test(`${lang} plain-text ${trigger} explanation uses one compact Haiku request on ${surface}`, { options: { chatQuestions: 'on', language: lang, context: 'full' } }, async ($, on) => {
+      test(`${lang} plain-text ${trigger} explanation uses one compact Haiku request on ${surface}`, { options: { plainTextQuestions: true, language: lang, context: 'full' } }, async ($, on) => {
         const calls = engineBeneath(on, {}, { completeReply: { ...EXPLANATION, usage: MEASURED_USAGE } })
         await submit($, 'Build a demo todo app.')
         await finishTurn($, CHAT_QUESTIONS[lang])
@@ -3734,7 +3743,7 @@ for (const surface of SURFACES) {
       })
     }
 
-    test(`${lang} Full context on a chat entry keeps plain-text instructions on ${surface}`, { options: { chatQuestions: 'on', language: lang } }, async ($, on) => {
+    test(`${lang} Full context on a chat entry keeps plain-text instructions on ${surface}`, { options: { plainTextQuestions: true, language: lang } }, async ($, on) => {
       const calls = engineBeneath(on, {}, {
         sessionModel: 'claude-opus-5-5', completeReply: { ...EXPLANATION, usage: MEASURED_USAGE }, forkReply: { ...EXPLANATION, text: 'FULL_CHAT_DEMO', usage: SESSION_USAGE },
       })
@@ -3756,7 +3765,7 @@ for (const surface of SURFACES) {
     })
   }
 
-  test(`the next normal prompt answers an explained chat entry and clears the band on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`the next normal prompt answers an explained chat entry and clears the band on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     await finishTurn($, 'Which approach do you prefer?')
     await submit($, '??')
@@ -3775,7 +3784,7 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  test(`a reply without an explanation clears the pending question without an entry on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`a reply without an explanation clears the pending question without an entry on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     await finishTurn($, 'Should I proceed?')
     await submit($, 'Yes, proceed.')
@@ -3789,7 +3798,7 @@ for (const surface of SURFACES) {
   })
 
   for (const explained of [false, true]) {
-    test(`a dropped reply preserves the ${explained ? 'explained' : 'unexplained'} plain-text question on ${surface}`, { options: { chatQuestions: 'on', language: 'en' } }, async ($, on) => {
+    test(`a dropped reply preserves the ${explained ? 'explained' : 'unexplained'} plain-text question on ${surface}`, { options: { plainTextQuestions: true, language: 'en' } }, async ($, on) => {
       const calls = engineBeneath(on, {}, { promptDrop: 'Use SQLite.' })
       await finishTurn($, 'Which database do you prefer?')
       if (explained) {
@@ -3814,7 +3823,7 @@ for (const surface of SURFACES) {
     })
   }
 
-  test(`the dismiss button clears the pending plain-text question on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`the dismiss button clears the pending plain-text question on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     await finishTurn($, 'Should I proceed?')
     const ui = await mountBand($, surface)
@@ -3829,7 +3838,7 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  test(`a reply during slow plain-text context setup remains answered after explanation on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`a reply during slow plain-text context setup remains answered after explanation on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {}, { messagesDelay: 1000 })
     await finishTurn($, 'Should I proceed?')
     const ui = await mountBand($, surface)
@@ -3855,7 +3864,7 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  test(`concurrent plain-text explanation button presses create one request on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`concurrent plain-text explanation button presses create one request on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {}, { completeDelay: 1000 })
     await finishTurn($, 'Should I proceed?')
     const ui = await mountBand($, surface)
@@ -3871,7 +3880,7 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  test(`dismissing an explained plain-text question cancels its entry on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`dismissing an explained plain-text question cancels its entry on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     await finishTurn($, 'Should I proceed?')
     await submit($, '??')
@@ -3885,7 +3894,7 @@ for (const surface of SURFACES) {
   })
 
   for (const preparing of [false, true]) {
-    test(`a stale dismiss cancels an explanation ${preparing ? 'being prepared' : 'already saved'} on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+    test(`a stale dismiss cancels an explanation ${preparing ? 'being prepared' : 'already saved'} on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
       const calls = engineBeneath(on, {})
       let holdDismiss = false
       let dismissHeld = false
@@ -3929,7 +3938,7 @@ for (const surface of SURFACES) {
     })
   }
 
-  test(`a stale dismiss preserves a newer plain-text question on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`a stale dismiss preserves a newer plain-text question on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     let holdDismiss = false
     let held = false
@@ -3959,7 +3968,7 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  test(`a retried dismiss preserves a newer question and leaves the original entry open on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`a retried dismiss preserves a newer question and leaves the original entry open on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     const newer: QaWaiting = { id: 'chat-demo-newer', lang: 'en', question: 'Which database do you prefer?', options: [], text: 'Which database do you prefer?' }
     let replace = false
@@ -3985,7 +3994,7 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  test(`?? stays local when preparing the explanation fails on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`?? stays local when preparing the explanation fails on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {}, { openThrows: true })
     await finishTurn($, 'Should I proceed?')
     const result = await $.prompt.submit({ text: '??', origin: { kind: 'composer' }, wait: false })
@@ -3993,7 +4002,7 @@ for (const surface of SURFACES) {
     expect(calls.submitted).toEqual([])
   })
 
-  test(`a reply whose result carries drop: undefined still answers the question on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`a reply whose result carries drop: undefined still answers the question on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {}, { promptDropUndefined: true })
     await finishTurn($, 'Should I proceed?')
     await submit($, '??')
@@ -4003,7 +4012,7 @@ for (const surface of SURFACES) {
     expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'answered' })
   })
 
-  test(`a reply sent while the explanation entry is being prepared is kept on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`a reply sent while the explanation entry is being prepared is kept on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     let held = false
     // Hold explainWaiting's first read of the recent prompts, after it claimed the question.
@@ -4029,7 +4038,7 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  test(`an open plain-text question keeps the scrollable full view in a small pane on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`an open plain-text question keeps the scrollable full view in a small pane on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     await finishTurn($, 'Should I proceed?')
     await submit($, '??')
@@ -4042,7 +4051,7 @@ for (const surface of SURFACES) {
   })
 
   for (const lang of ['en', 'ja'] as const) {
-    test(`${lang} history labels an open explained chat entry as awaiting on ${surface}`, { options: { chatQuestions: 'on', language: lang } }, async ($, on) => {
+    test(`${lang} history labels an open explained chat entry as awaiting on ${surface}`, { options: { plainTextQuestions: true, language: lang } }, async ($, on) => {
       const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' })
       await ask($)
       await calls.clock.settle()
@@ -4061,7 +4070,7 @@ for (const surface of SURFACES) {
     })
   }
 
-  test(`a later turn cancels an explained plain-text question nobody answered on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`a later turn cancels an explained plain-text question nobody answered on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     await finishTurn($, 'Should I proceed?')
     await submit($, '??')
@@ -4072,7 +4081,7 @@ for (const surface of SURFACES) {
     expect(calls.savedEntries[0]).toMatchObject({ kind: 'chat', status: 'cancelled' })
   })
 
-  test(`a delayed explanation button press cannot revive a dismissed question on ${surface}`, { options: { chatQuestions: 'on' } }, async ($, on) => {
+  test(`a delayed explanation button press cannot revive a dismissed question on ${surface}`, { options: { plainTextQuestions: true } }, async ($, on) => {
     const calls = engineBeneath(on, {})
     on('ui.press', { component: 'AbovePrompt', element: 'explain-waiting' }, async (_$, e, next) => {
       await calls.clock.sleep(1000)
@@ -4093,7 +4102,7 @@ for (const surface of SURFACES) {
   })
 }
 
-test('?? without a pending plain-text question passes every input field through unchanged', { options: { chatQuestions: 'on' } }, async ($, on) => {
+test('?? without a pending plain-text question passes every input field through unchanged', { options: { plainTextQuestions: true } }, async ($, on) => {
   const calls = engineBeneath(on, {})
   const input: PromptSubmitInput = { text: '??', origin: { kind: 'composer' }, wait: false, context: ['Demo context.'], attachments: [{ type: 'image', mediaType: 'image/png', filename: 'demo.png' }] }
   expect(await $.prompt.submit(input)).toEqual({ text: input.text, context: input.context, origin: input.origin })
@@ -4103,7 +4112,7 @@ test('?? without a pending plain-text question passes every input field through 
   expect(calls.fork).toBe(0)
 })
 
-test('?? with plain-text detection off passes through even when waiting state is present', { options: { chatQuestions: 'off' } }, async ($, on) => {
+test('?? with plain-text detection off passes through even when waiting state is present', { options: { plainTextQuestions: false } }, async ($, on) => {
   const calls = engineBeneath(on, {})
   on('state.get', { plugin: 'qa-guide', key: 'waiting' }, () => ({ value: { value: { id: 'demo-off', lang: 'en', question: 'Should I proceed?', options: [], text: 'Should I proceed?' }, version: 1 } }) as never)
   const input: PromptSubmitInput = { text: '??', origin: { kind: 'composer' }, wait: false }

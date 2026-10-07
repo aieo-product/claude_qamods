@@ -25,10 +25,10 @@ Change these in `/config` or with `/plugin configure qa-guide@<marketplace>`:
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `language` | `auto` | Language for the pane and explanations: `auto`, `en` or `ja` |
-| `context` | `compact` | `compact` sends a bounded summary to Haiku; `full` asks the session's model over the whole conversation |
-| `showCost` | `on` | Shows an API-price estimate beside measured tokens |
-| `chatQuestions` | `on` | Detects plain-text questions and shows the band above the prompt |
+| `language` | `auto` | Language for the pane and explanations. Type `auto`, `en` or `ja` |
+| `context` | `compact` | Type `compact` to send a bounded summary to Haiku, or `full` to ask the session's model over the whole conversation |
+| `priceEstimate` | on | Shows an API-price estimate beside measured tokens |
+| `plainTextQuestions` | on | Detects plain-text questions and shows the band above the prompt |
 
 ## What it reads, sends and stores
 
@@ -41,6 +41,15 @@ qa-guide makes no network requests of its own, starts no processes, and writes n
 - **Stores**: questions, answers, explanations and token totals in the session's memory only. They are gone when the session ends.
 
 Detecting plain-text questions and drawing the pane or band never call a model.
+
+## Hooks
+
+- `prompt.submit`: records your last 5 prompts. When a plain-text question is waiting and you send exactly `??`, qa-guide explains the question and drops `??`, so it is never sent to Claude. Every other prompt passes through unchanged and, when a question is waiting, is recorded as its answer.
+- `tool.call` for `AskUserQuestion`: opens the pane and starts the explanation, then lets the dialog run as usual and records your answer. It never answers the dialog for you.
+- `turn.complete`: checks the end of Claude's reply for a plain-text question, without calling a model.
+- `ui.render` for the pane and the band above the prompt, and `session.start` / `command.run` for `/qa-guide`.
+
+The mod does not change any Claude Code setting.
 
 ## License
 

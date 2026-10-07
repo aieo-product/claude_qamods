@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-07
+
+### Added
+
+- Plugin icon (`.claude-plugin/icon.png`) for the Claude plugin directory listing
+- The plugin README lists each hook the mod uses
+
+### Changed
+
+- The on/off settings are now toggles under new names: **API price estimate** (`priceEstimate`, was `showCost`) and **Plain-text questions** (`plainTextQuestions`, was `chatQuestions`). Both default to on; a value saved under the old name is ignored, so turn the setting off again if you had
+- `language` and `context` are typed in instead of picked from a list, because the plugin directory does not accept `userConfig` pickers yet. Their descriptions list the accepted values, and the values are read case-insensitively
+
 ## [0.5.2] - 2026-10-07
 
 ### Added
@@ -97,7 +109,8 @@ All notable changes to this project are documented here. The format follows [Kee
   - `/qa-guide` command, AI explanation toggle (`a`)
 - Marketplace manifest `claude-qamods`
 
-[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/aieo-product/claude_qamods/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/aieo-product/claude_qamods/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/aieo-product/claude_qamods/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/aieo-product/claude_qamods/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/aieo-product/claude_qamods/compare/v0.4.0...v0.5.0
