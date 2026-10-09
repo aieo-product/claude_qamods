@@ -75,7 +75,7 @@ Run these commands inside Claude Code:
 /plugin install qa-guide@claude-qamods
 ```
 
-The installer may report unset `userConfig` options. You can ignore this: `language` defaults to `auto`, `context` to `compact`, `priceEstimate` and `plainTextQuestions` to on. `language` and `context` are typed in; `priceEstimate` and `plainTextQuestions` are on/off toggles. To change an option, run `/plugin configure qa-guide@claude-qamods` or use `/config`.
+The installer may report unset `userConfig` options. You can ignore this: `language` defaults to `auto`, `context` to `compact`, `priceEstimate` and `plainTextQuestions` to on, `closeAfterAnswer` to off. `language` and `context` are typed in; `priceEstimate`, `plainTextQuestions` and `closeAfterAnswer` are on/off toggles. To change an option, run `/plugin configure qa-guide@claude-qamods` or use `/config`.
 
 To update, run `/plugin marketplace update claude-qamods` and then `/plugin update qa-guide@claude-qamods`. To remove it, run `/plugin uninstall qa-guide@claude-qamods`.
 
@@ -109,6 +109,8 @@ The `priceEstimate` option (**API price estimate**) is an on/off toggle and defa
 | `Esc` | pane focused | Return focus to the prompt |
 
 While the question dialog is open it holds the keyboard, so the pane cannot be scrolled. That is why the compact view is sized to fit. After you answer, the full view can be scrolled.
+
+The pane stays open after you answer or dismiss a question, so you can check your answer and step through the history. To have it close by itself instead, turn on **Close after answering** (`closeAfterAnswer`) in `/config`. It waits until no question is left open, and the next question opens it again.
 
 ## Plain-text questions
 

@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import type { ConfigRow, ModelCompleteRequest, ModelCompleteResult, ModelForkResult, ModelUsage, On, PaneOpenArgs, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionMessage, ToolCallResult, TurnCompleteInput, UiScrollArgs } from 'claude-code'
+import type { ConfigRow, ModelCompleteRequest, ModelCompleteResult, ModelForkResult, ModelUsage, On, PaneCloseInput, PaneOpenArgs, PromptOrigin, PromptSubmitInput, RenderPropsOf, SessionMessage, ToolCallResult, TurnCompleteInput, UiScrollArgs } from 'claude-code'
 
 import { buildCompactContext, detectWaiting, openQuestionPane } from './register'
 import { estimateCost, formatCost, resolvePrice } from './pricing'
@@ -98,6 +98,7 @@ type Calls = {
   savedCursor?: number
   toast: string[]
   opened: PaneOpenArgs[]
+  closed: PaneCloseInput[]
   registered: string[]
   registeredDescriptions: string[]
   languageLookups: string[]
@@ -109,6 +110,7 @@ type EngineOptions = {
   isPlaced?: boolean
   completeDelay?: number
   toolDelay?: number
+  toolDelays?: Record<string, number>
   completeReply?: ModelCompleteResult
   completeThrows?: boolean
   forkReply?: ModelForkResult
@@ -192,6 +194,7 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
     waitingWrites: 0,
     toast: [],
     opened: [],
+    closed: [],
     registered: [],
     registeredDescriptions: [],
     languageLookups: [],
@@ -251,6 +254,10 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
       ? { isPlaced: false, reason: 'Terminal is narrower than 144 columns.' }
       : { isPlaced: true } }
   })
+  on('ui.close', (_$, e) => {
+    calls.closed.push(e)
+    return { value: undefined }
+  })
   on('ui.toast', (_$, e) => {
     calls.toast.push(e.text)
     return { value: undefined }
@@ -290,7 +297,8 @@ function engineBeneath(on: On, answers: Record<string, string> | 'deny', options
   })
   on('tool.call', { tool: 'AskUserQuestion' }, async (_$, e): Promise<ToolCallResult<'AskUserQuestion'>> => {
     calls.order.push('tool')
-    if (options.toolDelay) await calls.clock.sleep(options.toolDelay)
+    const toolDelay = options.toolDelays?.[e.tool_use_id ?? ''] ?? options.toolDelay
+    if (toolDelay) await calls.clock.sleep(toolDelay)
     if (answers === 'deny') return { deny: 'The user dismissed the question.' }
     if (options.toolThrows) throw new Error('The turn was interrupted.')
     if (options.toolError) return { result: undefined, text: 'Question interrupted.', isError: true, ref: 7 }
@@ -4150,3 +4158,47 @@ for (const lang of ['en', 'ja'] as const) {
     })
   }
 }
+
+test('the pane stays open after an answer by default', async ($, on) => {
+  const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' })
+  await ask($)
+  await calls.clock.settle()
+  expect(calls.closed).toEqual([])
+})
+
+for (const [outcome, answers, options] of [
+  ['answered', { 'Which database should the demo app use?': 'SQLite' }, {}],
+  ['dismissed', 'deny', {}],
+  ['ended by a tool error', {}, { toolError: true }],
+] as const) {
+  test(`closeAfterAnswer closes the pane once the question is ${outcome}`, { options: { closeAfterAnswer: true } }, async ($, on) => {
+    const calls = engineBeneath(on, answers, options)
+    await ask($)
+    await calls.clock.settle()
+    expect(calls.closed).toEqual([expect.objectContaining({ id: 'qa-guide' })])
+  })
+}
+
+test('closeAfterAnswer closes the pane when the question is interrupted, and the error still propagates', { options: { closeAfterAnswer: true } }, async ($, on) => {
+  const calls = engineBeneath(on, {}, { toolThrows: true })
+  let rejected = false
+  try {
+    await ask($)
+  } catch {
+    rejected = true
+  }
+  expect(rejected).toBe(true)
+  expect(calls.closed).toEqual([expect.objectContaining({ id: 'qa-guide' })])
+})
+
+test('closeAfterAnswer keeps the pane while another question is still open', { options: { closeAfterAnswer: true } }, async ($, on) => {
+  const calls = engineBeneath(on, { 'Which database should the demo app use?': 'SQLite' }, { toolDelays: { toolu_first: 100, toolu_second: 200 } })
+  const first = ask($, QUESTIONS, 'toolu_first')
+  const second = ask($, QUESTIONS, 'toolu_second')
+  await calls.clock.advance(150)
+  await first
+  expect(calls.closed).toEqual([])
+  await calls.clock.advance(100)
+  await second
+  expect(calls.closed).toEqual([expect.objectContaining({ id: 'qa-guide' })])
+})

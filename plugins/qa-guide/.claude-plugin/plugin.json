@@ -38,7 +38,13 @@
       "description": "Context for AI explanations: compact (a bounded summary sent to Haiku) or full (the whole session on its model).",
       "default": "compact"
     },
-    "plainTextQuestions": {
+    "closeAfterAnswer": {
+    "type": "boolean",
+    "title": "Close after answering",
+    "description": "Close the pane once Claude's question is answered or dismissed. Off keeps it open with your answer and the history.",
+    "default": false
+  },
+  "plainTextQuestions": {
       "type": "boolean",
       "title": "Plain-text questions",
       "description": "Detect when Claude ends a turn with a question in plain text and offer an AI explanation above the prompt.",
