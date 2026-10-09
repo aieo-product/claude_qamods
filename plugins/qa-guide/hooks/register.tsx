@@ -950,6 +950,14 @@ export const register: Register = (on, options) => {
       await explain($, id, mode, compactContexts, runIds)
     }
 
+    // 回答待ちの質問がほかに残っているうちは閉じない。並んだ質問の先の1つが
+    // 片付いた時点で閉じると、まだ答えていない質問のペインまで消える。
+    const closeIfSettled = async () => {
+      if (options.closeAfterAnswer !== true) return
+      if ((await read($, entries)).some(x => x.status === 'open')) return
+      await $.ui.close({ id: PANE })
+    }
+
     let ran: Awaited<ReturnType<typeof next>>
     try {
       ran = await next(e)
@@ -958,6 +966,7 @@ export const register: Register = (on, options) => {
       await update($, entries, list =>
         list.map(x => (x.id === id ? { ...x, status: 'cancelled' as const } : x)),
       ).catch(() => undefined)
+      await closeIfSettled().catch(() => undefined)
       throw error
     }
     const result = ran.deny === undefined && !ran.isError ? ran.result : undefined
@@ -976,6 +985,7 @@ export const register: Register = (on, options) => {
           : x,
       ),
     )
+    await closeIfSettled()
 
     return ran
   })

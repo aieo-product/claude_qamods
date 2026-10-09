@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- **Close after answering** (`closeAfterAnswer`, off by default): closes the pane once a question is answered, dismissed or interrupted, as long as no other question is still open
+
 ## [0.5.4] - 2026-10-07
 
 ### Added

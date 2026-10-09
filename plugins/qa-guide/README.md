@@ -29,6 +29,7 @@ Change these in `/config` or with `/plugin configure qa-guide@<marketplace>`:
 | `context` | `compact` | Type `compact` to send a bounded summary to Haiku, or `full` to ask the session's model over the whole conversation |
 | `priceEstimate` | on | Shows an API-price estimate beside measured tokens |
 | `plainTextQuestions` | on | Detects plain-text questions and shows the band above the prompt |
+| `closeAfterAnswer` | off | Closes the pane once a question is answered or dismissed |
 
 ## What it reads, sends and stores
 

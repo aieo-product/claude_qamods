@@ -77,7 +77,7 @@ Claude Code の中で次の 2 つを実行します。
 
 ![要点のみで作った解説と「全文脈で解説」ボタン](docs/images/compact-context.png)
 
-インストール時に未設定の `userConfig` オプションがあると表示されることがありますが、対応は不要です。既定値は `language` が `auto`、`context` が `compact`、`priceEstimate` と `plainTextQuestions` が ON です。`language` と `context` は文字で入力し、`priceEstimate` と `plainTextQuestions` は ON/OFF の切り替えです。変更する場合は、`/plugin configure qa-guide@claude-qamods` か `/config` で設定してください。
+インストール時に未設定の `userConfig` オプションがあると表示されることがありますが、対応は不要です。既定値は `language` が `auto`、`context` が `compact`、`priceEstimate` と `plainTextQuestions` が ON、`closeAfterAnswer` が OFF です。`language` と `context` は文字で入力し、`priceEstimate`、`plainTextQuestions`、`closeAfterAnswer` は ON/OFF の切り替えです。変更する場合は、`/plugin configure qa-guide@claude-qamods` か `/config` で設定してください。
 
 更新は `/plugin marketplace update claude-qamods` のあとに `/plugin update qa-guide@claude-qamods`、アンインストールは `/plugin uninstall qa-guide@claude-qamods` です。
 
@@ -109,6 +109,8 @@ Claude Desktop アプリでは、質問ダイアログが開いている間も**
 | `Esc` | ペインにフォーカス中 | フォーカスをプロンプトに戻す |
 
 質問ダイアログが出ている間はダイアログがキーボードを握るので、ペインはスクロールできません。そのため、回答中はスクロールなしで収まるコンパクト表示にしています。回答したあとの全文表示はスクロールできます。
+
+回答したあとや質問を閉じたあとも、答えの確認と履歴のためにペインは開いたままです。自動で閉じたい場合は、`/config` で **Close after answering**（`closeAfterAnswer`）を ON にします。回答待ちの質問がほかに残っていないときに閉じ、次の質問でまた開きます。
 
 ## 文章での質問
 
